@@ -103,7 +103,14 @@ final class NativeWatcherEngine {
 
         // 2. Capture in-memory PNG
         guard let imageData = ScreenCapture.capture(windowID: windowID) else {
-            await MainActor.run { self.store.setWatcherStatus("⚠️ Screen capture failed") }
+            let hasPermission = ScreenCapture.hasScreenRecordingPermission()
+            await MainActor.run {
+                if hasPermission {
+                    self.store.setWatcherStatus("⚠️ Capture failed for window \(windowID) — window may be minimized or off-screen")
+                } else {
+                    self.store.setWatcherStatus("🔒 Screen Recording permission needed!\nGo to: System Settings → Privacy → Screen Recording → enable StakeLabHUD\nThen quit and reopen the app.")
+                }
+            }
             return
         }
 
@@ -243,14 +250,36 @@ enum ScreenCapture {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         proc.arguments = ["-l", "\(windowID)", "-x", "-o", "-t", "png", tmpPath]
-        proc.standardError = FileHandle.nullDevice
+        let errPipe = Pipe()
+        proc.standardError = errPipe
         do {
             try proc.run()
             proc.waitUntilExit()
         } catch { return nil }
 
-        guard proc.terminationStatus == 0 else { return nil }
-        return try? Data(contentsOf: URL(fileURLWithPath: tmpPath))
+        if proc.terminationStatus != 0 {
+            // Likely Screen Recording permission not granted
+            return nil
+        }
+        // If file is tiny (< 500 bytes) screencapture produced an empty/black image
+        // This also happens when Screen Recording is denied
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmpPath)),
+              data.count > 500 else { return nil }
+        return data
+    }
+
+    /// Returns true if Screen Recording permission appears to be granted
+    /// by attempting a test capture of the desktop
+    static func hasScreenRecordingPermission() -> Bool {
+        let tmpPath = NSTemporaryDirectory() + "stakelab_permcheck.png"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        proc.arguments = ["-x", "-t", "png", tmpPath]
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run(); proc.waitUntilExit()
+        let size = (try? FileManager.default.attributesOfItem(atPath: tmpPath)[.size] as? Int) ?? 0
+        return size > 1000
     }
 }
 
