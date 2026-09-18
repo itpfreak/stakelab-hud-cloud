@@ -403,7 +403,7 @@ enum StakeGeminiClient {
                     "data": imageData.base64EncodedString()
                 ]]
             ]]],
-            "generationConfig": ["temperature": 0.15, "maxOutputTokens": 400]
+            "generationConfig": ["temperature": 0.15, "maxOutputTokens": 800]
         ]
         return try JSONSerialization.data(withJSONObject: body)
     }
