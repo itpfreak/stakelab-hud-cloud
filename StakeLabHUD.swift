@@ -1853,8 +1853,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.backgroundColor = .clear
         window.hasShadow       = true
         // Set window level to .mainMenu / .popUpMenu so it remains visible above full screen apps & browsers
-        window.level           = .mainMenu
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        window.level           = .normal
+        window.collectionBehavior = [.canJoinAllSpaces]
         window.minSize         = NSSize(width: 260, height: 420)
         window.delegate        = self
 
