@@ -374,23 +374,7 @@ enum StakeGeminiClient {
         Game mode: \(mode) | Coaching style: \(style)
 
         Analyze the screenshot and return ONLY a JSON object — no markdown, no explanation:
-        {
-          "hand":           "hero hole cards e.g. '4s Th' using s/h/d/c for suits, or empty string",
-          "position":       "BTN | CO | HJ | MP | UTG | SB | BB | EP, or empty",
-          "board":          "community cards e.g. 'Ah Kd 2c' or empty if pre-flop",
-          "action":         "FOLD | CALL | CHECK | RAISE | BET | WAITING",
-          "recommendation": "one concise coaching sentence",
-          "confidence":     integer 0-100,
-          "hint":           "key read: pot odds, opponent tendency, or board texture note",
-          "small_blind":    "SB amount e.g. '0.01' or empty",
-          "big_blind":      "BB amount e.g. '0.02' or empty",
-          "ante":           "ante amount or empty",
-          "villain_names":  "comma-separated visible villain usernames or empty",
-          "game_type":      "NLH | PLO | SHORT",
-          "table_mode":     "CASH | TOURNEY",
-          "hero_has_cards": true or false,
-          "action_on_hero": true or false
-        }
+        {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
 
         Use action WAITING if: no active hand, hero folded, or it is not hero's turn.
         """
@@ -403,7 +387,7 @@ enum StakeGeminiClient {
                     "data": imageData.base64EncodedString()
                 ]]
             ]]],
-            "generationConfig": ["temperature": 0.0, "maxOutputTokens": 800, "response_mime_type": "application/json"]
+            "generationConfig": ["temperature": 0.0, "maxOutputTokens": 1200, "response_mime_type": "application/json"]
         ]
         return try JSONSerialization.data(withJSONObject: body)
     }
