@@ -1849,8 +1849,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = window else { return }
 
         window.title           = "Stake Lab HUD"
-        window.isOpaque        = false
-        window.backgroundColor = .clear
+        window.isOpaque        = true
+        window.backgroundColor = NSColor(red: 0.10, green: 0.12, blue: 0.18, alpha: 1.0)
         window.hasShadow       = true
         // Set window level to .mainMenu / .popUpMenu so it remains visible above full screen apps & browsers
         window.level           = .normal
@@ -1859,10 +1859,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate        = self
 
         let effect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight))
-        effect.material = .hudWindow; effect.blendingMode = .behindWindow; effect.state = .active
+        effect.material = .hudWindow; effect.blendingMode = .withinWindow; effect.state = .active
         effect.wantsLayer = true
         effect.layer?.cornerRadius = 10; effect.layer?.masksToBounds = true
-        effect.layer?.backgroundColor = NSColor.clear.cgColor
+        effect.layer?.backgroundColor = NSColor(red: 0.10, green: 0.12, blue: 0.18, alpha: 1.0).cgColor
 
         let hosting = NSHostingView(rootView: HUDContentView(store: store))
         hosting.frame = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
