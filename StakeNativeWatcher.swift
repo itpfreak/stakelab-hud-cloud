@@ -69,9 +69,10 @@ final class NativeWatcherEngine {
 
     private func runCycle(lastHash: inout Data) async {
         // 1. Find Stake table window in Floorp
-        guard let windowID = StakeTableDetector.findStakeWindow() else {
+        guard let windowID = StakeTableDetector.findStakeWindowID() else {
+            let dbg = StakeTableDetector.debugInfo()
             await MainActor.run {
-                self.store.setWatcherStatus("Waiting for Stake.com in Floorp…")
+                self.store.setWatcherStatus("No Floorp window found.\n\(dbg)")
             }
             return
         }
@@ -131,46 +132,65 @@ final class NativeWatcherEngine {
 // MARK: - Stake Table Detector
 
 enum StakeTableDetector {
-    /// Finds the best Floorp browser window showing a Stake.com poker table.
-    /// Prioritizes windows with "Stake" or "poker" in the title.
-    /// Supports normal window, theater mode, and full-screen.
-    static func findStakeWindow() -> CGWindowID? {
+    /// Finds the Floorp browser window showing Stake.com.
+    /// Firefox-based browsers (Floorp) may not expose tab titles to CGWindowList,
+    /// so we use the largest Floorp window as the primary target.
+    /// Logs what it finds so the Logs tab shows debug info.
+    static func findStakeWindow() -> (id: CGWindowID, title: String)? {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
                 as? [[String: Any]] else { return nil }
 
-        var stakeWindow:   (id: CGWindowID, area: CGFloat)?  // has "stake" in title
-        var floorpFallback: (id: CGWindowID, area: CGFloat)?  // any large Floorp window
+        var best: (id: CGWindowID, area: CGFloat, title: String)?
 
         for info in list {
+            guard let owner = info[kCGWindowOwnerName as String] as? String
+            else { continue }
+
+            // Match Floorp — may show as "Floorp", "floorp", "Floorp Browser"
+            // Also catch Firefox-based names in case Floorp uses a different identifier
+            let ownerLC = owner.lowercased()
+            guard ownerLC.contains("floorp") || ownerLC == "firefox" else { continue }
+
             guard
-                let owner = info[kCGWindowOwnerName as String] as? String,
-                // Floorp may appear as "Floorp", "floorp", or the bundle ID
-                owner.lowercased().contains("floorp"),
                 let rawID  = info[kCGWindowNumber as String] as? Int,
-                let bounds = info[kCGWindowBounds  as String] as? [String: CGFloat],
+                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
                 let w = bounds["Width"], let h = bounds["Height"],
-                w >= 800, h >= 500   // minimum table size
+                w >= 600, h >= 400   // relaxed minimum — handles smaller windows
             else { continue }
 
             let windowID = CGWindowID(rawID)
             let area     = w * h
-            let title    = (info[kCGWindowName as String] as? String ?? "").lowercased()
+            let title    = info[kCGWindowName as String] as? String ?? ""
 
-            // Best match: window title explicitly mentions stake or poker
-            if title.contains("stake") || title.contains("poker") || title.contains("nlhe") || title.contains("plo") {
-                if stakeWindow == nil || area > stakeWindow!.area {
-                    stakeWindow = (id: windowID, area: area)
-                }
-            } else {
-                // Fallback: largest Floorp window
-                if floorpFallback == nil || area > floorpFallback!.area {
-                    floorpFallback = (id: windowID, area: area)
-                }
+            if best == nil || area > best!.area {
+                best = (id: windowID, area: area, title: title)
             }
         }
+        return best.map { (id: $0.id, title: $0.title) }
+    }
 
-        return stakeWindow?.id ?? floorpFallback?.id
+    /// Public API — returns just the window ID
+    static func findStakeWindowID() -> CGWindowID? {
+        findStakeWindow()?.id
+    }
+
+    /// Debug info string for the Logs tab
+    static func debugInfo() -> String {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return "CGWindowList unavailable" }
+
+        var lines: [String] = ["=== Visible Windows (all owners) ==="]
+        let seen = list.prefix(30)
+        for info in seen {
+            let owner = info[kCGWindowOwnerName as String] as? String ?? "?"
+            let title = info[kCGWindowName as String] as? String ?? ""
+            let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            let w = bounds["Width"] ?? 0; let h = bounds["Height"] ?? 0
+            lines.append("  \(owner) | \(Int(w))×\(Int(h)) | \(title.prefix(40))")
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
