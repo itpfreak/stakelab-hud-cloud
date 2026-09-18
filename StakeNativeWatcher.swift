@@ -318,10 +318,6 @@ enum StakeGeminiClient {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
-        // Resize large images (browser windows can be 2560px+ Retina) to avoid timeouts
-        if let resized = resizeImageData(imageData, maxWidth: 1280) {
-            req.httpBody = try buildBody(imageData: resized, mode: mode, style: style)
-        }
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -409,13 +405,19 @@ enum StakeGeminiClient {
         if text.hasSuffix("```") { text = String(text.dropLast(3)) }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Extract JSON block — handle both prose wrappers and truncation
+        // Extract and repair JSON
+        // Step 1: strip to first { ... last }
         if let start = text.firstIndex(of: "{") {
             var candidate = String(text[start...])
-            // If truncated (no closing brace), close it to recover partial data
-            if !candidate.contains("}") { candidate += "\"}}" }
-            else if let end = candidate.lastIndex(of: "}") {
+            if let end = candidate.lastIndex(of: "}") {
                 candidate = String(candidate[...end])
+            } else {
+                // Truncated — strip back to last complete field (after last comma)
+                if let lastComma = candidate.lastIndex(of: ",") {
+                    candidate = String(candidate[...lastComma].dropLast()) + "}"
+                } else {
+                    candidate += "}"
+                }
             }
             text = candidate
         }
