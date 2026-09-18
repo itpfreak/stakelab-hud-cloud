@@ -1356,16 +1356,24 @@ struct LogsTabView: View {
                 .font(fzW(11, .semibold, .monospaced))
                 .foregroundColor(C.label)
 
-            // Selectable/copyable text area — newest lines at the TOP.
-            // TextEditor gives native copy/paste (Cmd+A, Cmd+C) unlike a plain Text view.
-            TextEditor(text: .constant(logText))
-                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                .foregroundColor(C.secondary)
-                .scrollContentBackground(.hidden)
-                .padding(4)
+            // Selectable log area — newest lines at BOTTOM, auto-scrolls down.
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    TextEditor(text: .constant(logText))
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .foregroundColor(C.secondary)
+                        .scrollContentBackground(.hidden)
+                        .padding(4)
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                        .id("logBottom")
+                }
                 .frame(maxWidth: .infinity, minHeight: 220)
                 .background(Color.black.opacity(0.5))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onChange(of: logText) { _ in
+                    withAnimation { proxy.scrollTo("logBottom", anchor: .bottom) }
+                }
+            }
         }
         .onAppear {
             fetchLog()
@@ -1383,8 +1391,8 @@ struct LogsTabView: View {
         let path = NSHomeDirectory() + "/Library/Logs/StakeLab/watcher.log"
         if let content = try? String(contentsOfFile: path, encoding: .utf8) {
             let lines = content.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            // Newest lines FIRST — reverse the tail so latest activity is always visible at top.
-            let tail = lines.suffix(60).reversed().joined(separator: "\n")
+            // Newest lines LAST — chronological order, auto-scroll keeps bottom visible.
+            let tail = lines.suffix(60).joined(separator: "\n")
             self.logText = tail.isEmpty ? "(Log is currently empty - waiting for captures)" : tail
         } else {
             self.logText = "Log file not created yet."
