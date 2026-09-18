@@ -387,7 +387,7 @@ enum StakeGeminiClient {
                     "data": imageData.base64EncodedString()
                 ]]
             ]]],
-            "generationConfig": ["temperature": 0.0, "maxOutputTokens": 1200, "response_mime_type": "application/json"]
+            "generationConfig": ["temperature": 0.0, "maxOutputTokens": 2000, "responseMimeType": "application/json"]
         ]
         return try JSONSerialization.data(withJSONObject: body)
     }
@@ -409,12 +409,15 @@ enum StakeGeminiClient {
         if text.hasSuffix("```") { text = String(text.dropLast(3)) }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Model returned prose? Extract first { ... } block
-        if !text.hasPrefix("{") {
-            if let start = text.firstIndex(of: "{"),
-               let end   = text.lastIndex(of: "}") {
-                text = String(text[start...end])
+        // Extract JSON block — handle both prose wrappers and truncation
+        if let start = text.firstIndex(of: "{") {
+            var candidate = String(text[start...])
+            // If truncated (no closing brace), close it to recover partial data
+            if !candidate.contains("}") { candidate += "\"}}" }
+            else if let end = candidate.lastIndex(of: "}") {
+                candidate = String(candidate[...end])
             }
+            text = candidate
         }
 
         guard
