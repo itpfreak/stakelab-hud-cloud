@@ -103,13 +103,8 @@ final class NativeWatcherEngine {
 
         // 2. Capture in-memory PNG
         guard let imageData = ScreenCapture.capture(windowID: windowID) else {
-            let hasPermission = ScreenCapture.hasScreenRecordingPermission()
             await MainActor.run {
-                if hasPermission {
-                    self.store.setWatcherStatus("⚠️ Capture failed for window \(windowID) — window may be minimized or off-screen")
-                } else {
-                    self.store.setWatcherStatus("🔒 Screen Recording permission needed!\nGo to: System Settings → Privacy → Screen Recording → enable StakeLabHUD\nThen quit and reopen the app.")
-                }
+                self.store.setWatcherStatus("⚠️ Capture failed — ensure Screen Recording is granted in System Settings → Privacy → Screen Recording")
             }
             return
         }
@@ -268,19 +263,6 @@ enum ScreenCapture {
         return data
     }
 
-    /// Returns true if Screen Recording permission appears to be granted
-    /// by attempting a test capture of the desktop
-    static func hasScreenRecordingPermission() -> Bool {
-        let tmpPath = NSTemporaryDirectory() + "stakelab_permcheck.png"
-        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        proc.arguments = ["-x", "-t", "png", tmpPath]
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run(); proc.waitUntilExit()
-        let size = (try? FileManager.default.attributesOfItem(atPath: tmpPath)[.size] as? Int) ?? 0
-        return size > 1000
-    }
 }
 
 // MARK: - .env Loader
@@ -332,16 +314,35 @@ enum StakeGeminiClient {
         guard let url = URL(string: endpoint) else {
             throw APIError.parse("Invalid URL")
         }
-        var req = URLRequest(url: url, timeoutInterval: 15)
+        var req = URLRequest(url: url, timeoutInterval: 45)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
+        // Resize large images (browser windows can be 2560px+ Retina) to avoid timeouts
+        if let resized = resizeImageData(imageData, maxWidth: 1280) {
+            req.httpBody = try buildBody(imageData: resized, mode: mode, style: style)
+        }
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw APIError.http(code, String(data: data, encoding: .utf8) ?? "")
         }
         return try parseResponse(data: data)
+    }
+
+    private static func resizeImageData(_ data: Data, maxWidth: CGFloat) -> Data? {
+        guard let src = NSImage(data: data), src.size.width > maxWidth else { return nil }
+        let scale   = maxWidth / src.size.width
+        let newSize = NSSize(width: maxWidth, height: src.size.height * scale)
+        let dst = NSImage(size: newSize)
+        dst.lockFocus()
+        src.draw(in: NSRect(origin: .zero, size: newSize),
+                 from: NSRect(origin: .zero, size: src.size),
+                 operation: .copy, fraction: 1.0)
+        dst.unlockFocus()
+        guard let tiff = dst.tiffRepresentation,
+              let rep  = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75])
     }
 
     private static func buildBody(imageData: Data, mode: String, style: String) throws -> Data {
