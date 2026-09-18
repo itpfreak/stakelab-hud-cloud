@@ -1356,23 +1356,17 @@ struct LogsTabView: View {
                 .font(fzW(11, .semibold, .monospaced))
                 .foregroundColor(C.label)
 
-            // Selectable log area — newest lines at BOTTOM, auto-scrolls down.
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: true) {
-                    TextEditor(text: .constant(logText))
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .foregroundColor(C.secondary)
-                        .scrollContentBackground(.hidden)
-                        .padding(4)
-                        .frame(maxWidth: .infinity, minHeight: 220)
-                        .id("logBottom")
-                }
-                .frame(maxWidth: .infinity, minHeight: 220)
-                .background(Color.black.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .onChange(of: logText) { _ in
-                    withAnimation { proxy.scrollTo("logBottom", anchor: .bottom) }
-                }
+            // Log area — newest at bottom, auto-scrolls via TextEditor native scroll.
+            // TextEditor inherently scrolls to show cursor at end when text updates.
+            ZStack(alignment: .bottomLeading) {
+                TextEditor(text: .constant(logText))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(C.secondary)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 320)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
         .onAppear {
