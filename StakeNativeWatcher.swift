@@ -425,6 +425,14 @@ enum StakeGeminiClient {
         if text.hasSuffix("```") { text = String(text.dropLast(3)) }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Model returned prose? Extract first { ... } block
+        if !text.hasPrefix("{") {
+            if let start = text.firstIndex(of: "{"),
+               let end   = text.lastIndex(of: "}") {
+                text = String(text[start...end])
+            }
+        }
+
         guard
             let jd = text.data(using: .utf8),
             let d  = try? JSONSerialization.jsonObject(with: jd) as? [String: Any]
