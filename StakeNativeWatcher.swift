@@ -29,6 +29,21 @@ extension AdviceStore {
     @MainActor
     func setWatcherStatus(_ msg: String) {
         captureToast = msg
+        // Also write to log file so LogsTabView can display it
+        let logDir  = NSHomeDirectory() + "/Library/Logs/StakeLab"
+        let logPath = logDir + "/watcher.log"
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(ts)] \(msg)\n"
+        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+                    fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logPath))
+            }
+        }
     }
 }
 
@@ -61,8 +76,17 @@ final class NativeWatcherEngine {
 
     private func loop() async {
         var lastHash = Data()
+        var cycleCount = 0
         while !Task.isCancelled {
             await runCycle(lastHash: &lastHash)
+            cycleCount += 1
+            // Every 8 cycles (~6s), dump visible process names to help debug window detection
+            if cycleCount % 8 == 0 {
+                let procs = StakeTableDetector.visibleProcessNames()
+                await MainActor.run {
+                    self.store.setWatcherStatus("Scanning... Visible apps: \(procs)")
+                }
+            }
             try? await Task.sleep(nanoseconds: 750_000_000) // 0.75s
         }
     }
@@ -175,20 +199,32 @@ enum StakeTableDetector {
         findStakeWindow()?.id
     }
 
-    /// Debug info string for the Logs tab
+    /// Returns comma-separated list of unique visible process names for debugging
+    static func visibleProcessNames() -> String {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return "unavailable" }
+        var seen = Set<String>()
+        for info in list {
+            if let owner = info[kCGWindowOwnerName as String] as? String {
+                seen.insert(owner)
+            }
+        }
+        return seen.sorted().joined(separator: ", ")
+    }
+
+    /// Full debug dump with window sizes and titles
     static func debugInfo() -> String {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
                 as? [[String: Any]] else { return "CGWindowList unavailable" }
-
-        var lines: [String] = ["=== Visible Windows (all owners) ==="]
-        let seen = list.prefix(30)
-        for info in seen {
-            let owner = info[kCGWindowOwnerName as String] as? String ?? "?"
-            let title = info[kCGWindowName as String] as? String ?? ""
+        var lines: [String] = ["=== Visible Windows ==="]
+        for info in list.prefix(40) {
+            let owner  = info[kCGWindowOwnerName as String] as? String ?? "?"
+            let title  = info[kCGWindowName as String] as? String ?? ""
             let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
-            let w = bounds["Width"] ?? 0; let h = bounds["Height"] ?? 0
-            lines.append("  \(owner) | \(Int(w))×\(Int(h)) | \(title.prefix(40))")
+            let w = Int(bounds["Width"] ?? 0); let h = Int(bounds["Height"] ?? 0)
+            lines.append("\(owner) | \(w)×\(h) | \(title.prefix(50))")
         }
         return lines.joined(separator: "\n")
     }
