@@ -125,13 +125,13 @@ final class NativeWatcherEngine {
 
         guard !ocrResult.rawText.isEmpty else {
             await MainActor.run {
-                self.store.setWatcherStatus("WARNING: Vision OCR returned no text -- check screen capture size/permission")
+                self.store.setWatcherStatus("WARNING: Vision OCR returned no text -- check Floorp window / permissions")
             }
             return
         }
 
-        // 5. Call local LLM
-        await MainActor.run { self.store.setWatcherStatus("Asking Qwen 2.5 (localhost:1234)...") }
+        let summary = "OCR: pot=\(ocrResult.potSize.isEmpty ? "-" : ocrResult.potSize) cards=\(ocrResult.heroCards) btns=\(ocrResult.detectedButtons)"
+        await MainActor.run { self.store.setWatcherStatus("\(summary) -> Asking Qwen 2.5...") }
 
         do {
             let advice = try await LMStudioClient.analyze(
@@ -139,18 +139,19 @@ final class NativeWatcherEngine {
                 mode:      settings.gameMode.rawValue,
                 style:     settings.coachingStyle.rawValue
             )
-            guard advice.action != "WAITING" else {
-                await MainActor.run { self.store.setWatcherStatus("Waiting for hand...") }
-                return
-            }
             await MainActor.run {
                 self.store.setAdvice(advice)
-                self.store.setWatcherStatus("OK: \(advice.action) -- \(advice.recommendation.prefix(60))")
-                if self.settings.voiceAlerts && !advice.action.isEmpty {
-                    let sayProc = Process()
-                    sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-                    sayProc.arguments = [advice.action.lowercased()]
-                    try? sayProc.run()
+                if advice.action == "WAITING" {
+                    let msg = advice.recommendation.isEmpty ? "Waiting for action / hand" : advice.recommendation
+                    self.store.setWatcherStatus("Waiting: \(msg.prefix(60))")
+                } else {
+                    self.store.setWatcherStatus("OK: \(advice.action) -- \(advice.recommendation.prefix(60))")
+                    if self.settings.voiceAlerts && !advice.action.isEmpty && advice.actionOnHero {
+                        let sayProc = Process()
+                        sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+                        sayProc.arguments = [advice.action.lowercased()]
+                        try? sayProc.run()
+                    }
                 }
             }
         } catch {
@@ -164,16 +165,17 @@ final class NativeWatcherEngine {
 // MARK: - Apple Vision Table Reader
 
 struct TableOCRResult {
-    var rawText:     String
-    var heroCards:   [String]
-    var boardCards:  [String]
-    var potSize:     String
-    var heroStack:   String
-    var smallBlind:  String
-    var bigBlind:    String
-    var gameType:    String
-    var tableMode:   String
-    var villainInfo: String
+    var rawText:         String
+    var heroCards:       [String]
+    var boardCards:      [String]
+    var potSize:         String
+    var heroStack:       String
+    var smallBlind:      String
+    var bigBlind:        String
+    var gameType:        String
+    var tableMode:       String
+    var villainInfo:     String
+    var detectedButtons: [String]
 }
 
 enum AppleVisionTableReader {
@@ -226,7 +228,8 @@ enum AppleVisionTableReader {
     private static func emptyResult() -> TableOCRResult {
         TableOCRResult(rawText: "", heroCards: [], boardCards: [], potSize: "",
                        heroStack: "", smallBlind: "", bigBlind: "",
-                       gameType: "", tableMode: "", villainInfo: "")
+                       gameType: "", tableMode: "", villainInfo: "",
+                       detectedButtons: [])
     }
 
     private static func parseOCRLines(_ lines: [String], rawText: String) -> TableOCRResult {
@@ -240,7 +243,7 @@ enum AppleVisionTableReader {
         var tableMode    = "CASH"
         var villainLines: [String] = []
 
-        let cardPattern  = "[2-9TJQKA][shdc]"
+        let cardPattern  = "(?:10|[2-9TJQKA])[shdc♠♥♦♣♤♡♢♧]"
         let moneyPattern = "\\$[\\d]+\\.[\\d]{2}"
 
         func matches(_ pattern: String, in text: String) -> [String] {
@@ -248,6 +251,15 @@ enum AppleVisionTableReader {
             let range = NSRange(text.startIndex..., in: text)
             return re.matches(in: text, range: range).compactMap {
                 Range($0.range, in: text).map { String(text[$0]) }
+            }
+        }
+
+        // Detect action buttons
+        let lowerRaw = rawText.lowercased()
+        var detectedButtons: [String] = []
+        for btn in ["fold", "check", "call", "raise", "bet", "all in", "all-in"] {
+            if lowerRaw.contains(btn) {
+                detectedButtons.append(btn.uppercased())
             }
         }
 
@@ -293,16 +305,17 @@ enum AppleVisionTableReader {
         }
 
         return TableOCRResult(
-            rawText:     rawText,
-            heroCards:   heroCards,
-            boardCards:  boardCards,
-            potSize:     potSize,
-            heroStack:   heroStack,
-            smallBlind:  smallBlind,
-            bigBlind:    bigBlind,
-            gameType:    gameType,
-            tableMode:   tableMode,
-            villainInfo: villainLines.suffix(10).joined(separator: "; ")
+            rawText:         rawText,
+            heroCards:       heroCards,
+            boardCards:      boardCards,
+            potSize:         potSize,
+            heroStack:       heroStack,
+            smallBlind:      smallBlind,
+            bigBlind:        bigBlind,
+            gameType:        gameType,
+            tableMode:       tableMode,
+            villainInfo:     villainLines.suffix(10).joined(separator: "; "),
+            detectedButtons: detectedButtons
         )
     }
 }
@@ -345,8 +358,11 @@ Coaching style: \(style).
 Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
 {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
 
-Use action WAITING if: no active hand, hero has folded, or it is not hero's turn.
-Keep recommendation under 20 words. hint under 12 words.
+CRITICAL RULES:
+1. If "has_action_buttons" is true or action buttons (Fold, Check, Call, Raise, Bet) appear in "raw_ocr_text", action_on_hero is TRUE. You MUST give an actionable recommendation (CHECK, CALL, BET, RAISE, FOLD). Do NOT return action WAITING when action buttons are visible!
+2. If "hero_cards" is empty, inspect "raw_ocr_text" to find card ranks/suits or board cards. If cards cannot be read with certainty, recommend the best move (e.g. CHECK if free, or FOLD) based on visible context.
+3. If hero has folded or no active hand is being played, use action "WAITING" and action_on_hero false. Still populate hand, position, board, blinds, and a brief recommendation like "Waiting for next hand".
+4. Keep recommendation under 20 words. hint under 12 words.
 """
 
         let body: [String: Any] = [
@@ -385,17 +401,19 @@ Keep recommendation under 20 words. hint under 12 words.
         var raw = ocrResult.rawText
         if raw.count > 1200 { raw = String(raw.prefix(1200)) + "..." }
         let obj: [String: Any] = [
-            "game_mode":    mode,
-            "game_type":    ocrResult.gameType.isEmpty  ? "NLH"  : ocrResult.gameType,
-            "table_mode":   ocrResult.tableMode.isEmpty ? "CASH" : ocrResult.tableMode,
-            "hero_cards":   ocrResult.heroCards,
-            "board_cards":  ocrResult.boardCards,
-            "pot":          ocrResult.potSize,
-            "hero_stack":   ocrResult.heroStack,
-            "small_blind":  ocrResult.smallBlind,
-            "big_blind":    ocrResult.bigBlind,
-            "villain_info": ocrResult.villainInfo,
-            "raw_ocr_text": raw
+            "game_mode":               mode,
+            "game_type":               ocrResult.gameType.isEmpty  ? "NLH"  : ocrResult.gameType,
+            "table_mode":              ocrResult.tableMode.isEmpty ? "CASH" : ocrResult.tableMode,
+            "hero_cards":              ocrResult.heroCards,
+            "board_cards":             ocrResult.boardCards,
+            "pot":                     ocrResult.potSize,
+            "hero_stack":              ocrResult.heroStack,
+            "small_blind":             ocrResult.smallBlind,
+            "big_blind":               ocrResult.bigBlind,
+            "detected_buttons":        ocrResult.detectedButtons,
+            "has_action_buttons":      !ocrResult.detectedButtons.isEmpty,
+            "villain_info":            ocrResult.villainInfo,
+            "raw_ocr_text":            raw
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: .prettyPrinted),
               let str  = String(data: data, encoding: .utf8) else { return "{}" }
@@ -459,8 +477,8 @@ Keep recommendation under 20 words. hint under 12 words.
             villainNames:   s("villain_names"),
             gameType:       s("game_type").isEmpty  ? ocrResult.gameType  : s("game_type"),
             tableMode:      s("table_mode").isEmpty ? ocrResult.tableMode : s("table_mode"),
-            heroHasCards:   (d["hero_has_cards"] as? Bool) ?? (act != "WAITING"),
-            actionOnHero:   (d["action_on_hero"] as? Bool) ?? (act != "WAITING" && !act.isEmpty)
+            heroHasCards:   (d["hero_has_cards"] as? Bool) ?? (!s("hand").isEmpty || !ocrResult.heroCards.isEmpty),
+            actionOnHero:   (d["action_on_hero"] as? Bool) ?? (!ocrResult.detectedButtons.isEmpty || (act != "WAITING" && !act.isEmpty))
         )
     }
 }
