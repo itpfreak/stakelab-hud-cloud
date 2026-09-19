@@ -515,198 +515,125 @@ func fzW(_ base: CGFloat, _ weight: Font.Weight, _ design: Font.Design = .defaul
     .system(size: base * HUDSettings.shared.fontScale, weight: weight, design: design)
 }
 
-// MARK: - Toolbar (mode toggle + text size)
+// MARK: - Toolbar (minimalist top bar)
 
 struct HUDToolbar: View {
     @ObservedObject var settings = HUDSettings.shared
     @ObservedObject var store: AdviceStore
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                // Cash / Tourney toggle
-                HStack(spacing: 0) {
-                    ForEach(GameMode.allCases, id: \.self) { mode in
-                        Button(action: {
-                            settings.gameMode = mode
-                            settings.save()
-                        }) {
-                            Text("\(mode.icon) \(mode.label)")
-                                .font(fzW(10, .bold, .monospaced))
-                                .foregroundColor(settings.gameMode == mode ? .black : C.label)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 4)
-                                .background(settings.gameMode == mode
-                                    ? (mode == .cash ? C.call : C.tourneyBadge)
-                                    : Color.clear)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .background(C.divider.opacity(0.4))
-                .clipShape(Capsule())
-
-                // Coaching Style Menu
-                Menu {
-                    Text("Coaching Style:")
-                    ForEach(CoachingStyle.allCases, id: \.self) { style in
-                        Button(action: {
-                            settings.coachingStyle = style
-                            settings.save()
-                        }) {
-                            Text(settings.coachingStyle == style ? "✓ \(style.icon) \(style.label)" : "\(style.icon) \(style.label)")
-                        }
-                    }
-                    Divider()
+        HStack(spacing: 8) {
+            // Cash / Tourney toggle
+            HStack(spacing: 0) {
+                ForEach(GameMode.allCases, id: \.self) { mode in
                     Button(action: {
-                        settings.streamerMode.toggle()
-                        if settings.streamerMode {
-                            settings.coachingStyle = .streamer
-                        } else if settings.coachingStyle == .streamer {
-                            settings.coachingStyle = .gto
-                        }
+                        settings.gameMode = mode
                         settings.save()
                     }) {
-                        Text(settings.streamerMode ? "✓ 🎮 Streamer Mode (ON)" : "🎮 Streamer Mode (OFF)")
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Text("\(settings.coachingStyle.icon) \(settings.coachingStyle.shortLabel)")
+                        Text("\(mode.icon) \(mode.label)")
                             .font(fzW(10, .bold, .monospaced))
-                            .foregroundColor(settings.streamerMode ? .purple : C.secondary)
-                        Image(systemName: "chevron.down").font(.system(size: 8))
-                            .foregroundColor(C.label)
+                            .foregroundColor(settings.gameMode == mode ? .black : C.label)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(settings.gameMode == mode
+                                ? (mode == .cash ? C.call : C.tourneyBadge)
+                                : Color.clear)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(settings.streamerMode ? Color.purple.opacity(0.2) : C.secondary.opacity(0.18))
-                    .clipShape(Capsule())
+                    .buttonStyle(.plain)
                 }
-                .menuStyle(.borderlessButton)
+            }
+            .background(C.divider.opacity(0.4))
+            .clipShape(Capsule())
 
-                Spacer()
+            // Active Style Badge
+            Text("\(settings.coachingStyle.icon) \(settings.coachingStyle.shortLabel)")
+                .font(fzW(10, .bold, .monospaced))
+                .foregroundColor(settings.streamerMode ? .purple : C.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(settings.streamerMode ? Color.purple.opacity(0.2) : C.secondary.opacity(0.18))
+                .clipShape(Capsule())
 
-                // Voice Alert dropdown menu
-                Menu {
-                    Button(settings.voiceAlerts ? "Disable Voice" : "Enable Voice") {
-                        settings.voiceAlerts.toggle()
+            Spacer()
+
+            // Settings Menu
+            Menu {
+                Text("Coaching Style:")
+                ForEach(CoachingStyle.allCases, id: \.self) { style in
+                    Button(action: {
+                        settings.coachingStyle = style
                         settings.save()
+                    }) {
+                        Text(settings.coachingStyle == style ? "✓ \(style.icon) \(style.label)" : "\(style.icon) \(style.label)")
                     }
-                    Divider()
-                    Text("Voice Profile:")
+                }
+                Divider()
+                Button(action: {
+                    settings.streamerMode.toggle()
+                    if settings.streamerMode {
+                        settings.coachingStyle = .streamer
+                    } else if settings.coachingStyle == .streamer {
+                        settings.coachingStyle = .gto
+                    }
+                    settings.save()
+                }) {
+                    Text(settings.streamerMode ? "✓ 🎮 Streamer Mode (ON)" : "🎮 Streamer Mode (OFF)")
+                }
+                Divider()
+                Text("Voice Alerts:")
+                Button(settings.voiceAlerts ? "✓ Voice Alerts Enabled" : "Enable Voice Alerts") {
+                    settings.voiceAlerts.toggle()
+                    settings.save()
+                }
+                if settings.voiceAlerts {
                     Button(settings.voiceName == "Samantha" ? "✓ Samantha (US Natural)" : "Samantha (US Natural)") {
                         settings.voiceName = "Samantha"; settings.save()
                     }
                     Button(settings.voiceName == "Daniel" ? "✓ Daniel (UK Formal)" : "Daniel (UK Formal)") {
                         settings.voiceName = "Daniel"; settings.save()
                     }
-                    Button(settings.voiceName == "Karen" ? "✓ Karen (AU Calm)" : "Karen (AU Calm)") {
-                        settings.voiceName = "Karen"; settings.save()
-                    }
-                    Button(settings.voiceName == "Moira" ? "✓ Moira (Irish Clear)" : "Moira (Irish Clear)") {
-                        settings.voiceName = "Moira"; settings.save()
-                    }
-                    Divider()
-                    Text("Speed:")
-                    Button(settings.voiceRate == 140 ? "✓ Slower (140 wpm)" : "Slower (140 wpm)") {
-                        settings.voiceRate = 140; settings.save()
-                    }
-                    Button(settings.voiceRate == 165 ? "✓ Natural (165 wpm)" : "Natural (165 wpm)") {
-                        settings.voiceRate = 165; settings.save()
-                    }
-                    Button(settings.voiceRate == 190 ? "✓ Faster (190 wpm)" : "Faster (190 wpm)") {
-                        settings.voiceRate = 190; settings.save()
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(settings.voiceAlerts ? "🔊" : "🔇")
-                        Text(settings.voiceAlerts ? settings.voiceName : "OFF")
-                            .font(fzW(9, .bold, .monospaced))
-                    }
-                    .foregroundColor(settings.voiceAlerts ? C.raise : C.label)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(settings.voiceAlerts ? C.raise.opacity(0.18) : Color.gray.opacity(0.15))
-                    .clipShape(Capsule())
                 }
-                .menuStyle(.borderlessButton)
-
-                // Layout / Display Settings Menu (Preset + Font Size + Opacity)
-                Menu {
-                    Text("Device / Window Preset:")
-                    ForEach(HUDSizePreset.allCases, id: \.self) { preset in
-                        Button(action: {
-                            settings.sizePreset = preset
-                            settings.fontScale = preset.dimensions.fontScale
-                            settings.save()
-                            if let appDelegate = NSApp.delegate as? AppDelegate {
-                                appDelegate.positionOnSecondaryMonitor()
-                            }
-                        }) {
-                            Text(settings.sizePreset == preset ? "✓ \(preset.rawValue) (\(Int(preset.dimensions.width))px)" : "\(preset.rawValue) (\(Int(preset.dimensions.width))px)")
+                Divider()
+                Text("Window Preset:")
+                ForEach(HUDSizePreset.allCases, id: \.self) { preset in
+                    Button(action: {
+                        settings.sizePreset = preset
+                        settings.fontScale = preset.dimensions.fontScale
+                        settings.save()
+                        if let appDelegate = NSApp.delegate as? AppDelegate {
+                            appDelegate.positionOnSecondaryMonitor()
                         }
+                    }) {
+                        Text(settings.sizePreset == preset ? "✓ \(preset.rawValue) (\(Int(preset.dimensions.width))px)" : "\(preset.rawValue) (\(Int(preset.dimensions.width))px)")
                     }
-                    Divider()
-                    Text("Text Scale:")
-                    Button(settings.fontScale == 0.75 ? "✓ Small (75%)" : "Small (75%)") {
-                        settings.fontScale = 0.75; settings.save()
-                    }
-                    Button(settings.fontScale == 1.0 ? "✓ Standard (100%)" : "Standard (100%)") {
-                        settings.fontScale = 1.0; settings.save()
-                    }
-                    Button(settings.fontScale == 1.25 ? "✓ Large (125%)" : "Large (125%)") {
-                        settings.fontScale = 1.25; settings.save()
-                    }
-                    Button(settings.fontScale == 1.5 ? "✓ Extra Large (150%)" : "Extra Large (150%)") {
-                        settings.fontScale = 1.5; settings.save()
-                    }
-                    Divider()
-                    Text("Glass Opacity (Overlay Mode):")
-                    Button(settings.hudOpacity >= 0.95 ? "✓ 100% Solid" : "100% Solid") {
-                        settings.hudOpacity = 0.98; settings.save()
-                    }
-                    Button(abs(settings.hudOpacity - 0.85) < 0.05 ? "✓ 85% Frosted Dark" : "85% Frosted Dark") {
-                        settings.hudOpacity = 0.85; settings.save()
-                    }
-                    Button(abs(settings.hudOpacity - 0.70) < 0.05 ? "✓ 70% Semi-Transparent" : "70% Semi-Transparent") {
-                        settings.hudOpacity = 0.70; settings.save()
-                    }
-                    Button(abs(settings.hudOpacity - 0.50) < 0.05 ? "✓ 50% Glass Overlay" : "50% Glass Overlay") {
-                        settings.hudOpacity = 0.50; settings.save()
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Text("📐 \(settings.sizePreset.rawValue)")
-                            .font(fzW(10, .bold, .monospaced))
-                        if settings.hudOpacity < 0.90 {
-                            Text("· 🪟\(Int(settings.hudOpacity * 100))%")
-                                .font(fzW(9, .bold, .monospaced))
-                                .foregroundColor(C.cyan)
-                        }
-                        Image(systemName: "chevron.down").font(.system(size: 8))
-                    }
-                    .foregroundColor(C.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(C.divider.opacity(0.4))
-                    .clipShape(Capsule())
                 }
-                .menuStyle(.borderlessButton)
-            }
-
-            // Capture toast — shows for 8s when an opponent is profiled
-            if !store.captureToast.isEmpty {
-                HStack(spacing: 6) {
-                    Text(store.captureToast)
-                        .font(fzW(11, .bold, .monospaced))
-                        .foregroundColor(C.raise)
-                    Spacer()
+                Divider()
+                Text("Glass Opacity:")
+                Button(settings.hudOpacity >= 0.95 ? "✓ 100% Solid" : "100% Solid") {
+                    settings.hudOpacity = 0.98; settings.save()
                 }
+                Button(abs(settings.hudOpacity - 0.85) < 0.05 ? "✓ 85% Frosted" : "85% Frosted") {
+                    settings.hudOpacity = 0.85; settings.save()
+                }
+                Button(abs(settings.hudOpacity - 0.70) < 0.05 ? "✓ 70% Semi-Transparent" : "70% Semi-Transparent") {
+                    settings.hudOpacity = 0.70; settings.save()
+                }
+                Divider()
+                Text("Hero: \(settings.heroUsername)")
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 11))
+                    Text("Settings")
+                        .font(fzW(10, .bold, .monospaced))
+                }
+                .foregroundColor(C.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(C.raise.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .background(C.divider.opacity(0.4))
+                .clipShape(Capsule())
             }
+            .menuStyle(.borderlessButton)
         }
     }
 }
@@ -735,30 +662,30 @@ struct ConfidencePill: View {
 struct PlayingCardPill: View {
     let raw: String
     
-    // Parse single card e.g. "10♦", "A♠", "K♥", "2♣"
     private var suit: String {
-        if raw.contains("♦") || raw.contains("d") { return "♦" }
-        if raw.contains("♥") || raw.contains("h") { return "♥" }
-        if raw.contains("♣") || raw.contains("c") { return "♣" }
-        if raw.contains("♠") || raw.contains("s") { return "♠" }
+        let l = raw.lowercased()
+        if raw.contains("♦") || l.hasSuffix("d") { return "♦" }
+        if raw.contains("♥") || l.hasSuffix("h") { return "♥" }
+        if raw.contains("♣") || l.hasSuffix("c") { return "♣" }
+        if raw.contains("♠") || l.hasSuffix("s") { return "♠" }
         return ""
     }
     
     private var rank: String {
-        raw.replacingOccurrences(of: "♦", with: "")
-           .replacingOccurrences(of: "♥", with: "")
-           .replacingOccurrences(of: "♣", with: "")
-           .replacingOccurrences(of: "♠", with: "")
-           .trimmingCharacters(in: .whitespaces)
+        var r = raw
+        for s in ["♦", "♥", "♣", "♠", "d", "h", "c", "s", "D", "H", "C", "S"] {
+            r = r.replacingOccurrences(of: s, with: "")
+        }
+        return r.trimmingCharacters(in: .whitespaces)
     }
     
     private var badgeBgColor: Color {
         switch suit {
-        case "♦": return Color(red: 0.12, green: 0.45, blue: 0.95) // Vibrant Stake Blue
+        case "♦": return Color(red: 0.12, green: 0.45, blue: 0.95) // Stake Blue
         case "♥": return Color(red: 0.92, green: 0.22, blue: 0.22) // Vibrant Red
-        case "♣": return Color(red: 0.18, green: 0.72, blue: 0.32) // Vibrant Stake Green
+        case "♣": return Color(red: 0.18, green: 0.72, blue: 0.32) // Stake Green
         case "♠": return Color(red: 0.14, green: 0.15, blue: 0.18) // Dark / Black
-        default:  return Color(white: 0.2)
+        default:  return Color(red: 0.22, green: 0.24, blue: 0.30) // Neutral
         }
     }
     
@@ -772,15 +699,15 @@ struct PlayingCardPill: View {
     var body: some View {
         HStack(spacing: 3) {
             Text(rank)
-                .font(fzW(20, .black, .rounded))
+                .font(fzW(18, .black, .rounded))
                 .foregroundColor(.white)
             if !suit.isEmpty {
                 Text(suit)
-                    .font(fzW(18, .black, .rounded))
+                    .font(fzW(16, .black, .rounded))
                     .foregroundColor(.white)
             }
         }
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(badgeBgColor)
         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -796,7 +723,17 @@ struct CardRowView: View {
     let cardsString: String
     
     private var cardList: [String] {
-        cardsString.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        let pattern = "(?:10|[2-9TJQKA])[shdc♠♥♦♣♤♡♢♧]?"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return cardsString.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        }
+        let range = NSRange(cardsString.startIndex..., in: cardsString)
+        let matches = re.matches(in: cardsString, range: range).compactMap {
+            Range($0.range, in: cardsString).map { String(cardsString[$0]) }
+        }
+        return matches.isEmpty
+            ? cardsString.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            : matches
     }
     
     var body: some View {
@@ -818,51 +755,38 @@ struct StatusHeader: View {
     var blindsDisplay: String {
         guard !smallBlind.isEmpty, !bigBlind.isEmpty else { return "" }
         let base = "\(smallBlind)/\(bigBlind)"
-        return ante.isEmpty ? base : "\(base) (\(ante) ante)"
+        return ante.isEmpty ? base : "\(base) (\(ante))"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Circle().fill(isIdle ? Color.orange : Color.green).frame(width: 12, height: 12)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle().fill(isIdle ? Color.orange : Color.green).frame(width: 8, height: 8)
                 Text(isIdle ? "IDLE" : "LIVE")
-                    .font(fzW(16, .bold, .monospaced))
+                    .font(fzW(12, .bold, .monospaced))
                     .foregroundColor(isIdle ? .orange : .green)
                 if !position.isEmpty {
                     Text("·").foregroundColor(C.label)
                     Text(position.uppercased())
-                        .font(fzW(16, .semibold, .monospaced)).foregroundColor(C.secondary)
+                        .font(fzW(13, .bold, .monospaced)).foregroundColor(C.secondary)
                 }
-                // Game Type badge (NLH, PLO4, PLO5)
+                if !blindsDisplay.isEmpty {
+                    Text("·").foregroundColor(C.label)
+                    Text(blindsDisplay)
+                        .font(fzW(12, .semibold, .monospaced)).foregroundColor(C.secondary)
+                }
                 if !gameType.isEmpty {
+                    Text("·").foregroundColor(C.label)
                     Text(gameType)
                         .font(fzW(11, .bold, .monospaced))
-                        .foregroundColor(gameType.contains("PLO") ? .black : C.secondary)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(gameType.contains("PLO") ? C.gold : C.divider.opacity(0.4))
-                        .clipShape(Capsule())
-                }
-                if settings.gameMode == .tourney {
-                    Text("🏆 TOURNEY")
-                        .font(fzW(11, .bold, .monospaced))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(C.tourneyBadge).clipShape(Capsule())
+                        .foregroundColor(gameType.contains("PLO") ? C.gold : C.label)
                 }
                 Spacer()
-                Text(latency).font(fz(13)).foregroundColor(C.label)
-            }
-            // Blinds row
-            if !blindsDisplay.isEmpty {
-                HStack(spacing: 6) {
-                    Text("BLINDS").font(fzW(11, .bold, .monospaced)).foregroundColor(C.label)
-                    Text(blindsDisplay).font(fzW(14, .semibold, .monospaced)).foregroundColor(C.secondary)
-                }
             }
             // Hole cards rendered with 4-Color Deck Badges
             if !hand.isEmpty {
                 HStack(spacing: 8) {
-                    Text("HOLE CARDS").font(fzW(12, .bold, .monospaced)).foregroundColor(C.label)
+                    Text("HOLE CARDS").font(fzW(11, .bold, .monospaced)).foregroundColor(C.label)
                     CardRowView(cardsString: hand)
                 }
             }
