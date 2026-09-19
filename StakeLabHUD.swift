@@ -89,6 +89,7 @@ final class HUDSettings: ObservableObject {
     @Published var voiceRate:     Int           = 175
     @Published var sizePreset:    HUDSizePreset = .standard
     @Published var hudOpacity:    Double        = 0.95   // 0.40 to 1.00 for transparent fullscreen overlay
+    @Published var heroUsername:  String        = "J4clubs"
     @Published var savedFrameX:   Double?       = nil
     @Published var savedFrameY:   Double?       = nil
     @Published var savedFrameW:   Double?       = nil
@@ -106,7 +107,8 @@ final class HUDSettings: ObservableObject {
             "voiceName": voiceName,
             "voiceRate": voiceRate,
             "sizePreset": sizePreset.rawValue,
-            "hudOpacity": hudOpacity
+            "hudOpacity": hudOpacity,
+            "heroUsername": heroUsername
         ]
         if let x = savedFrameX, let y = savedFrameY, let w = savedFrameW, let h = savedFrameH {
             d["savedFrameX"] = x
@@ -136,6 +138,7 @@ final class HUDSettings: ObservableObject {
         if let vr = d["voiceRate"] as? Int { voiceRate = vr }
         if let p = d["sizePreset"] as? String, let preset = HUDSizePreset(rawValue: p) { sizePreset = preset }
         if let op = d["hudOpacity"] as? Double { hudOpacity = op }
+        if let u = d["heroUsername"] as? String, !u.isEmpty { heroUsername = u }
         if let x = d["savedFrameX"] as? Double, let y = d["savedFrameY"] as? Double,
            let w = d["savedFrameW"] as? Double, let h = d["savedFrameH"] as? Double {
             savedFrameX = x
