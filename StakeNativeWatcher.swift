@@ -14,6 +14,7 @@ import Foundation
 extension AdviceStore {
     @MainActor
     func setAdvice(_ advice: PokerAdvice) {
+        lastId      = advice.id  // prevent SQLite poll from overwriting
         current     = advice
         isIdle      = false
         latencyText = "live"
