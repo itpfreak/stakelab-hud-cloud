@@ -750,6 +750,7 @@ struct StatusHeader: View {
     let isIdle: Bool;     let hand: String
     let smallBlind: String; let bigBlind: String; let ante: String
     let gameType: String
+    let heroHasCards: Bool
     @ObservedObject var settings = HUDSettings.shared
 
     var blindsDisplay: String {
@@ -783,8 +784,8 @@ struct StatusHeader: View {
                 }
                 Spacer()
             }
-            // Hole cards rendered with 4-Color Deck Badges
-            if !hand.isEmpty {
+            // Hole cards rendered with 4-Color Deck Badges (only shown when hero is in hand)
+            if heroHasCards && !hand.isEmpty {
                 HStack(spacing: 8) {
                     Text("HOLE CARDS").font(fzW(11, .bold, .monospaced)).foregroundColor(C.label)
                     CardRowView(cardsString: hand)
@@ -1407,7 +1408,8 @@ struct HUDContentView: View {
             StatusHeader(position: advice.position, latency: store.latencyText,
                          isIdle: store.isIdle, hand: advice.hand,
                          smallBlind: advice.smallBlind, bigBlind: advice.bigBlind,
-                         ante: advice.ante, gameType: advice.gameType)
+                         ante: advice.ante, gameType: advice.gameType,
+                         heroHasCards: advice.heroHasCards)
                 .opacity(store.isIdle ? 0.5 : 1.0)
 
             Rectangle().fill(C.divider).frame(height: 1)
