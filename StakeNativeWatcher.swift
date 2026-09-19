@@ -180,6 +180,7 @@ struct TableOCRResult {
     var detectedButtons: [String]
     var heroFound:       Bool
     var heroSeat:        String
+    var isHeroFolded:    Bool
 }
 
 enum AppleVisionTableReader {
@@ -238,7 +239,8 @@ enum AppleVisionTableReader {
         TableOCRResult(rawText: "", heroCards: [], boardCards: [], potSize: "",
                        heroStack: "", smallBlind: "", bigBlind: "",
                        gameType: "", tableMode: "", villainInfo: "",
-                       detectedButtons: [], heroFound: false, heroSeat: "")
+                       detectedButtons: [], heroFound: false, heroSeat: "",
+                       isHeroFolded: false)
     }
 
     private static func parseOCRItems(items: [TextItem], rawText: String, heroUsername: String) -> TableOCRResult {
@@ -250,9 +252,7 @@ enum AppleVisionTableReader {
         var tableMode     = "CASH"
         var villainLines: [String] = []
 
-        let cardWithSuitPattern = "(?<![a-zA-Z0-9])(?:10|[2-9TJQKA])[shdc♠♥♦♣♤♡♢♧](?![a-zA-Z0-9])"
-        let rankOnlyPattern     = "(?<![a-zA-Z0-9])(?:10|[2-9TJQKA])(?![a-zA-Z0-9])"
-        let moneyPattern        = "\\$[\\d]+\\.[\\d]{2}"
+        let moneyPattern = "\\$[\\d]+\\.[\\d]{2}"
 
         func matches(_ pattern: String, in text: String) -> [String] {
             guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
@@ -294,11 +294,56 @@ enum AppleVisionTableReader {
                 detectedButtons.append(btn.uppercased())
             }
         }
+        let hasPlayButtons = detectedButtons.contains("CALL") || detectedButtons.contains("CHECK") || detectedButtons.contains("RAISE") || detectedButtons.contains("BET")
 
-        // 3. Scan items for game info, pot, cards, and stacks
+        // 3. Card extraction helper
+        let cardWithSuitRegex = try? NSRegularExpression(pattern: "\\b(?:10|[2-9TJQKA])[shdc♠♥♦♣♤♡♢♧]\\b|\\b(?:10|[2-9TJQKA])[♠♥♦♣♤♡♢♧]", options: [.caseInsensitive])
+        let twoRanksRegex     = try? NSRegularExpression(pattern: "\\b(10|[2-9TJQKA])\\s*(10|[2-9TJQKA])\\b", options: [.caseInsensitive])
+        let singleRankRegex   = try? NSRegularExpression(pattern: "\\b(10|[2-9TJQKA])\\b", options: [.caseInsensitive])
+
+        func extractCards(from line: String) -> [String] {
+            var t = line
+            t = t.replacingOccurrences(of: "\\$[\\d.]+", with: " ", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\d+/\\d+", with: " ", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\b\\d+(?:\\.\\d+)?[xXbB]+\\b", with: " ", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\b\\d+s\\b", with: " ", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\b\\d+%\\b", with: " ", options: .regularExpression)
+            t = t.replacingOccurrences(of: "\\b\\d+-max\\b", with: " ", options: .regularExpression)
+            for w in ["stack", "check", "call", "fold", "folded", "raise", "bet", "pot", "dealer", "table", "auto", "time", "bank", "lobby", "tourney", "total"] {
+                t = t.replacingOccurrences(of: "\\b\(w)\\b", with: " ", options: [.regularExpression, .caseInsensitive])
+            }
+            if !target.isEmpty {
+                t = t.replacingOccurrences(of: "\\bJ4clubs?\\b", with: " ", options: [.regularExpression, .caseInsensitive])
+            }
+
+            let range = NSRange(t.startIndex..., in: t)
+
+            if let re = cardWithSuitRegex {
+                let m = re.matches(in: t, range: range).compactMap { Range($0.range, in: t).map { String(t[$0]) } }
+                if !m.isEmpty { return m }
+            }
+
+            if let re = twoRanksRegex {
+                let m = re.matches(in: t, range: range)
+                if let first = m.first, first.numberOfRanges >= 3 {
+                    var pair: [String] = []
+                    if let r1 = Range(first.range(at: 1), in: t) { pair.append(String(t[r1])) }
+                    if let r2 = Range(first.range(at: 2), in: t) { pair.append(String(t[r2])) }
+                    if pair.count == 2 { return pair }
+                }
+            }
+
+            if let re = singleRankRegex {
+                let m = re.matches(in: t, range: range).compactMap { Range($0.range, in: t).map { String(t[$0]) } }
+                if !m.isEmpty { return m }
+            }
+
+            return []
+        }
+
+        // 4. Scan items for game info, pot, cards, and stacks
         var boardCards: [String] = []
-        var nonBoardSuitCards: [(card: String, dist: CGFloat)] = []
-        var nonBoardRankCards: [(card: String, dist: CGFloat)] = []
+        var nonBoardCardsWithDist: [(card: String, dist: CGFloat)] = []
 
         for item in items {
             let trimmed = item.text.trimmingCharacters(in: .whitespaces)
@@ -328,7 +373,7 @@ enum AppleVisionTableReader {
                 }
             }
 
-            // Skip card extraction on hero username item to avoid "J4clubs" matching "4c" or "J"
+            // Exclude username item
             if heroFound && (item.text == heroMatchedText || trimmed.lowercased().contains(target)) {
                 continue
             }
@@ -336,32 +381,18 @@ enum AppleVisionTableReader {
                 continue
             }
 
-            let cardsWithSuit = matches(cardWithSuitPattern, in: trimmed)
-            let ranksOnly     = matches(rankOnlyPattern, in: trimmed)
-
+            let cards = extractCards(from: trimmed)
             let ix = item.box.midX
             let iy = item.box.midY
-
-            // Center community board area (Stake table center):
-            // normalized x: 0.28...0.72, y: 0.38...0.65
             let isCenterBoard = (ix >= 0.28 && ix <= 0.72) && (iy >= 0.38 && iy <= 0.65)
             let distToHero = heroFound ? hypot(ix - heroX, iy - heroY) : hypot(ix - 0.5, iy - 0.2)
 
-            if isCenterBoard {
-                if !cardsWithSuit.isEmpty {
-                    boardCards.append(contentsOf: cardsWithSuit)
-                } else if !ranksOnly.isEmpty {
-                    boardCards.append(contentsOf: ranksOnly)
-                }
-            } else {
-                // Non-board face-up cards belong to Hero!
-                if !cardsWithSuit.isEmpty {
-                    for c in cardsWithSuit {
-                        nonBoardSuitCards.append((card: c, dist: distToHero))
-                    }
-                } else if !ranksOnly.isEmpty {
-                    for r in ranksOnly {
-                        nonBoardRankCards.append((card: r, dist: distToHero))
+            if !cards.isEmpty {
+                if isCenterBoard {
+                    boardCards.append(contentsOf: cards)
+                } else {
+                    for c in cards {
+                        nonBoardCardsWithDist.append((card: c, dist: distToHero))
                     }
                 }
             }
@@ -377,16 +408,14 @@ enum AppleVisionTableReader {
             }
         }
 
-        // Sort non-board cards by proximity to hero seat
-        nonBoardSuitCards.sort { $0.dist < $1.dist }
-        nonBoardRankCards.sort { $0.dist < $1.dist }
+        // 5. Detect if hero has folded
+        let isHeroFolded = (lowerRaw.contains("folded") || (lowerRaw.contains("fold") && !hasPlayButtons)) || (nonBoardCardsWithDist.isEmpty && !hasPlayButtons)
 
-        let maxHole = gameType.contains("PLO") ? 4 : 2
         var heroCards: [String] = []
-        if !nonBoardSuitCards.isEmpty {
-            heroCards = Array(nonBoardSuitCards.prefix(maxHole).map { $0.card })
-        } else if !nonBoardRankCards.isEmpty {
-            heroCards = Array(nonBoardRankCards.prefix(maxHole).map { $0.card })
+        if !isHeroFolded {
+            nonBoardCardsWithDist.sort { $0.dist < $1.dist }
+            let maxHole = gameType.contains("PLO") ? 4 : 2
+            heroCards = Array(nonBoardCardsWithDist.prefix(maxHole).map { $0.card })
         }
 
         return TableOCRResult(
@@ -402,7 +431,8 @@ enum AppleVisionTableReader {
             villainInfo:     villainLines.suffix(10).joined(separator: "; "),
             detectedButtons: detectedButtons,
             heroFound:       heroFound,
-            heroSeat:        heroSeatStr
+            heroSeat:        heroSeatStr,
+            isHeroFolded:    isHeroFolded
         )
     }
 }
@@ -442,16 +472,16 @@ enum LMStudioClient {
 You are a live poker HUD engine for Stake.com online poker.
 You receive an OCR-extracted table state JSON from a Stake.com screenshot.
 Coaching style: \(style).
-Hero username on Stake.com is "\(heroUsername)".
+Hero username on Stake.com: "\(heroUsername)".
 
 Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
 {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
 
 CRITICAL RULES:
-1. "\(heroUsername)" is hero's USERNAME, NOT hero's hand! Do NOT output "J4" or "J4 clubs" as the hand unless two distinct cards showing Jack and 4 are actually in "hero_cards".
-2. If "hero_cards" has cards, output them formatted with spaces in "hand" (e.g. "Ah Kd" or "10s 9c"). If "hero_cards" is empty, set "hand" to "".
-3. If "has_action_buttons" is true or action buttons (Fold, Check, Call, Raise, Bet) appear on screen, action_on_hero is TRUE. You MUST output an actionable recommendation (CHECK, CALL, BET, RAISE, FOLD). Do NOT return action WAITING when action buttons are visible!
-4. Only use action "WAITING" if hero has folded or no hand is active.
+1. "\(heroUsername)" is hero's USERNAME, NOT hero's hand! Never report "J4" or "J4 clubs" as the hand.
+2. If "is_hero_folded" is true or "hero_cards" is empty, hero is FOLDED. Set "hand" to "", "hero_has_cards" to false, "action_on_hero" to false, "action" to "WAITING", and recommendation to "Folded — observing table".
+3. If "hero_cards" has cards (e.g. ["K", "8"] or ["Kh", "8c"]), output them in "hand" separated by spaces (e.g. "K 8").
+4. If "has_action_buttons" is true, action_on_hero is TRUE. Give an actionable recommendation (CHECK, CALL, BET, RAISE, FOLD). Do NOT return WAITING when action buttons are visible!
 5. Keep recommendation under 20 words. hint under 12 words.
 """
 
@@ -494,6 +524,7 @@ CRITICAL RULES:
             "hero_username":           heroUsername,
             "hero_seat_detected":      ocrResult.heroFound,
             "hero_seat_coordinates":   ocrResult.heroSeat,
+            "is_hero_folded":          ocrResult.isHeroFolded,
             "game_mode":               mode,
             "game_type":               ocrResult.gameType.isEmpty  ? "NLH"  : ocrResult.gameType,
             "table_mode":              ocrResult.tableMode.isEmpty ? "CASH" : ocrResult.tableMode,
@@ -556,10 +587,10 @@ CRITICAL RULES:
 
         var hand = s("hand")
         let cleanH = hand.lowercased().filter { $0.isLetter || $0.isNumber }
-        if cleanH == "j4clubs" || (cleanH == "j4" && ocrResult.heroCards.isEmpty) {
+        if ocrResult.isHeroFolded || cleanH == "j4clubs" || (cleanH == "j4" && ocrResult.heroCards.isEmpty) {
             hand = ""
         }
-        if hand.isEmpty && !ocrResult.heroCards.isEmpty {
+        if hand.isEmpty && !ocrResult.heroCards.isEmpty && !ocrResult.isHeroFolded {
             hand = ocrResult.heroCards.joined(separator: " ")
         }
 
@@ -567,6 +598,9 @@ CRITICAL RULES:
         if board.isEmpty && !ocrResult.boardCards.isEmpty {
             board = ocrResult.boardCards.joined(separator: " ")
         }
+
+        let heroHasCards = !ocrResult.isHeroFolded && (!hand.isEmpty || !ocrResult.heroCards.isEmpty)
+        let actionOnHero = !ocrResult.isHeroFolded && (!ocrResult.detectedButtons.isEmpty || (act != "WAITING" && !act.isEmpty))
 
         return PokerAdvice(
             id:             id,
@@ -584,8 +618,8 @@ CRITICAL RULES:
             villainNames:   s("villain_names"),
             gameType:       s("game_type").isEmpty  ? ocrResult.gameType  : s("game_type"),
             tableMode:      s("table_mode").isEmpty ? ocrResult.tableMode : s("table_mode"),
-            heroHasCards:   (d["hero_has_cards"] as? Bool) ?? (!s("hand").isEmpty || !ocrResult.heroCards.isEmpty),
-            actionOnHero:   (d["action_on_hero"] as? Bool) ?? (!ocrResult.detectedButtons.isEmpty || (act != "WAITING" && !act.isEmpty))
+            heroHasCards:   heroHasCards,
+            actionOnHero:   actionOnHero
         )
     }
 }
