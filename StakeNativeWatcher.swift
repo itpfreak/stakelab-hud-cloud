@@ -17,6 +17,7 @@ extension AdviceStore {
         current     = advice
         isIdle      = false
         latencyText = "live"
+        lastId      = advice.id  // block SQLite poller from overwriting this advice
     }
 
     @MainActor
