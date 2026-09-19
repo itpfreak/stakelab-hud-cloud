@@ -1,13 +1,19 @@
 // StakeNativeWatcher.swift
-// Native Swift screen capture + Gemini vision analysis for Stake.com
+// Native Swift screen capture + Apple Vision OCR + Local Qwen 2.5 via LM Studio
 // Target: Floorp browser (Firefox-based) running Stake.com poker tables
-// Zero Python. Zero external processes (except /usr/sbin/screencapture).
 //
-// Requires: macOS 12+, Screen Recording permission
+// Architecture:
+//   Stage 1 — ScreenCapture: /usr/sbin/screencapture grabs Floorp window PNG
+//   Stage 2 — AppleVisionTableReader: VNRecognizeTextRequest extracts all visible text
+//   Stage 3 — LMStudioClient: structured table JSON -> Qwen 2.5 7B @ localhost:1234
+//
+// Zero cloud. Zero API key. Zero token cost.
+// Requires: macOS 12+, Screen Recording permission, LM Studio running on port 1234
 
 import AppKit
 import CryptoKit
 import Foundation
+import Vision
 
 // MARK: - AdviceStore Extension
 
@@ -24,13 +30,12 @@ extension AdviceStore {
     func clearAdvice() {
         current     = nil
         isIdle      = true
-        latencyText = "—"
+        latencyText = "---"
     }
 
     @MainActor
     func setWatcherStatus(_ msg: String) {
         captureToast = msg
-        // Also write to log file so LogsTabView can display it
         let logDir  = NSHomeDirectory() + "/Library/Logs/StakeLab"
         let logPath = logDir + "/watcher.log"
         let ts = ISO8601DateFormatter().string(from: Date())
@@ -76,12 +81,11 @@ final class NativeWatcherEngine {
     }
 
     private func loop() async {
-        var lastHash = Data()
+        var lastHash   = Data()
         var cycleCount = 0
         while !Task.isCancelled {
             await runCycle(lastHash: &lastHash)
             cycleCount += 1
-            // Every 8 cycles (~6s), dump visible process names to help debug window detection
             if cycleCount % 8 == 0 {
                 let procs = StakeTableDetector.visibleProcessNames()
                 await MainActor.run {
@@ -105,42 +109,43 @@ final class NativeWatcherEngine {
         // 2. Capture in-memory PNG
         guard let imageData = ScreenCapture.capture(windowID: windowID) else {
             await MainActor.run {
-                self.store.setWatcherStatus("⚠️ Capture failed — ensure Screen Recording is granted in System Settings → Privacy → Screen Recording")
+                self.store.setWatcherStatus("WARNING: Capture failed -- ensure Screen Recording is granted in System Settings -> Privacy -> Screen Recording")
             }
             return
         }
 
-        // 3. Hash — skip API if unchanged
+        // 3. Hash -- skip OCR+LLM if screen unchanged
         let hash = Data(SHA256.hash(data: imageData))
         guard hash != lastHash else { return }
         lastHash = hash
 
-        // 4. Load Gemini key
-        let apiKey = EnvLoader.geminiKey()
-        guard !apiKey.isEmpty else {
+        // 4. OCR the table with Apple Vision
+        await MainActor.run { self.store.setWatcherStatus("Reading table (Vision OCR)...") }
+        let ocrResult = await AppleVisionTableReader.read(imageData: imageData)
+
+        guard !ocrResult.rawText.isEmpty else {
             await MainActor.run {
-                self.store.setWatcherStatus("⚠️ GEMINI_API_KEY missing — check .env")
+                self.store.setWatcherStatus("WARNING: Vision OCR returned no text -- check screen capture size/permission")
             }
             return
         }
 
-        await MainActor.run { self.store.setWatcherStatus("🔍 Analyzing Stake table…") }
+        // 5. Call local LLM
+        await MainActor.run { self.store.setWatcherStatus("Asking Qwen 2.5 (localhost:1234)...") }
 
-        // 5. Gemini vision
         do {
-            let advice = try await StakeGeminiClient.analyze(
-                imageData: imageData,
+            let advice = try await LMStudioClient.analyze(
+                ocrResult: ocrResult,
                 mode:      settings.gameMode.rawValue,
-                style:     settings.coachingStyle.rawValue,
-                apiKey:    apiKey
+                style:     settings.coachingStyle.rawValue
             )
             guard advice.action != "WAITING" else {
-                await MainActor.run { self.store.setWatcherStatus("Waiting for hand…") }
+                await MainActor.run { self.store.setWatcherStatus("Waiting for hand...") }
                 return
             }
             await MainActor.run {
                 self.store.setAdvice(advice)
-                self.store.setWatcherStatus("✅ \(advice.action) — \(advice.recommendation.prefix(60))")
+                self.store.setWatcherStatus("OK: \(advice.action) -- \(advice.recommendation.prefix(60))")
                 if self.settings.voiceAlerts && !advice.action.isEmpty {
                     let sayProc = Process()
                     sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
@@ -150,255 +155,261 @@ final class NativeWatcherEngine {
             }
         } catch {
             await MainActor.run {
-                self.store.setWatcherStatus("⚠️ \(error.localizedDescription.prefix(120))")
+                self.store.setWatcherStatus("LLM error: \(error.localizedDescription.prefix(120))")
             }
         }
     }
 }
 
-// MARK: - Stake Table Detector
+// MARK: - Apple Vision Table Reader
 
-enum StakeTableDetector {
-    /// Finds the Floorp browser window showing Stake.com.
-    /// Firefox-based browsers (Floorp) may not expose tab titles to CGWindowList,
-    /// so we use the largest Floorp window as the primary target.
-    /// Logs what it finds so the Logs tab shows debug info.
-    static func findStakeWindow() -> (id: CGWindowID, title: String)? {
-        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
-                as? [[String: Any]] else { return nil }
+struct TableOCRResult {
+    var rawText:     String
+    var heroCards:   [String]
+    var boardCards:  [String]
+    var potSize:     String
+    var heroStack:   String
+    var smallBlind:  String
+    var bigBlind:    String
+    var gameType:    String
+    var tableMode:   String
+    var villainInfo: String
+}
 
-        var best: (id: CGWindowID, area: CGFloat, title: String)?
+enum AppleVisionTableReader {
 
-        for info in list {
-            guard let owner = info[kCGWindowOwnerName as String] as? String
-            else { continue }
+    static func read(imageData: Data) async -> TableOCRResult {
+        return await withCheckedContinuation { continuation in
+            guard let cgImage = makeCGImage(from: imageData) else {
+                continuation.resume(returning: emptyResult())
+                return
+            }
 
-            // Match Floorp — may show as "Floorp", "floorp", "Floorp Browser"
-            // Also catch Firefox-based names in case Floorp uses a different identifier
-            let ownerLC = owner.lowercased()
-            guard ownerLC.contains("floorp") || ownerLC == "firefox" else { continue }
+            let request = VNRecognizeTextRequest { req, error in
+                guard error == nil,
+                      let observations = req.results as? [VNRecognizedTextObservation]
+                else {
+                    continuation.resume(returning: emptyResult())
+                    return
+                }
 
-            guard
-                let rawID  = info[kCGWindowNumber as String] as? Int,
-                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
-                let w = bounds["Width"], let h = bounds["Height"],
-                w >= 600, h >= 400   // relaxed minimum — handles smaller windows
-            else { continue }
+                var lines: [(text: String, y: CGFloat)] = []
+                for obs in observations {
+                    guard let top = obs.topCandidates(1).first else { continue }
+                    lines.append((text: top.string, y: obs.boundingBox.minY))
+                }
+                lines.sort { $0.y > $1.y }
+                let rawText = lines.map { $0.text }.joined(separator: "\n")
+                let result  = parseOCRLines(lines.map { $0.text }, rawText: rawText)
+                continuation.resume(returning: result)
+            }
 
-            let windowID = CGWindowID(rawID)
-            let area     = w * h
-            let title    = info[kCGWindowName as String] as? String ?? ""
+            request.recognitionLevel        = .accurate
+            request.usesLanguageCorrection  = false
+            request.recognitionLanguages    = ["en-US"]
 
-            if best == nil || area > best!.area {
-                best = (id: windowID, area: area, title: title)
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(returning: emptyResult())
             }
         }
-        return best.map { (id: $0.id, title: $0.title) }
     }
 
-    /// Public API — returns just the window ID
-    static func findStakeWindowID() -> CGWindowID? {
-        findStakeWindow()?.id
+    private static func makeCGImage(from data: Data) -> CGImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        return img
     }
 
-    /// Returns comma-separated list of unique visible process names for debugging
-    static func visibleProcessNames() -> String {
-        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
-                as? [[String: Any]] else { return "unavailable" }
-        var seen = Set<String>()
-        for info in list {
-            if let owner = info[kCGWindowOwnerName as String] as? String {
-                seen.insert(owner)
+    private static func emptyResult() -> TableOCRResult {
+        TableOCRResult(rawText: "", heroCards: [], boardCards: [], potSize: "",
+                       heroStack: "", smallBlind: "", bigBlind: "",
+                       gameType: "", tableMode: "", villainInfo: "")
+    }
+
+    private static func parseOCRLines(_ lines: [String], rawText: String) -> TableOCRResult {
+        var heroCards:   [String] = []
+        var boardCards:  [String] = []
+        var potSize      = ""
+        var heroStack    = ""
+        var smallBlind   = ""
+        var bigBlind     = ""
+        var gameType     = "NLH"
+        var tableMode    = "CASH"
+        var villainLines: [String] = []
+
+        let cardPattern  = "[2-9TJQKA][shdc]"
+        let moneyPattern = "\\$[\\d]+\\.[\\d]{2}"
+
+        func matches(_ pattern: String, in text: String) -> [String] {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+            let range = NSRange(text.startIndex..., in: text)
+            return re.matches(in: text, range: range).compactMap {
+                Range($0.range, in: text).map { String(text[$0]) }
             }
         }
-        return seen.sorted().joined(separator: ", ")
-    }
 
-    /// Full debug dump with window sizes and titles
-    static func debugInfo() -> String {
-        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
-                as? [[String: Any]] else { return "CGWindowList unavailable" }
-        var lines: [String] = ["=== Visible Windows ==="]
-        for info in list.prefix(40) {
-            let owner  = info[kCGWindowOwnerName as String] as? String ?? "?"
-            let title  = info[kCGWindowName as String] as? String ?? ""
-            let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
-            let w = Int(bounds["Width"] ?? 0); let h = Int(bounds["Height"] ?? 0)
-            lines.append("\(owner) | \(w)×\(h) | \(title.prefix(50))")
+        for line in lines {
+            let trimmed  = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            let upperLine = trimmed.uppercased()
+
+            if upperLine.contains("NLH") || upperLine.contains("NLHE") { gameType = "NLH" }
+            else if upperLine.contains("PLO") { gameType = "PLO" }
+
+            if upperLine.contains("TOURNEY") || upperLine.contains("MTT") || upperLine.contains("SIT") {
+                tableMode = "TOURNEY"
+            }
+
+            if let slashRange = trimmed.range(of: "\\$[\\d.]+/\\$[\\d.]+", options: .regularExpression) {
+                let blindStr = String(trimmed[slashRange])
+                let parts = blindStr.components(separatedBy: "/")
+                if parts.count == 2 { smallBlind = parts[0]; bigBlind = parts[1] }
+            }
+
+            if trimmed.lowercased().hasPrefix("pot") {
+                let moneys = matches(moneyPattern, in: trimmed)
+                if let p = moneys.first { potSize = p }
+            } else if potSize.isEmpty {
+                let moneys = matches(moneyPattern, in: trimmed)
+                if moneys.count == 1 && !trimmed.lowercased().contains("buy") {
+                    potSize = moneys[0]
+                }
+            }
+
+            let cards = matches(cardPattern, in: trimmed)
+            if !cards.isEmpty {
+                if cards.count == 2 && heroCards.isEmpty { heroCards = cards }
+                else if cards.count >= 3 { boardCards = cards }
+            }
+
+            let moneys = matches(moneyPattern, in: trimmed)
+            if !moneys.isEmpty && trimmed != potSize {
+                villainLines.append(trimmed)
+                heroStack = moneys.last ?? heroStack
+            }
         }
-        return lines.joined(separator: "\n")
+
+        return TableOCRResult(
+            rawText:     rawText,
+            heroCards:   heroCards,
+            boardCards:  boardCards,
+            potSize:     potSize,
+            heroStack:   heroStack,
+            smallBlind:  smallBlind,
+            bigBlind:    bigBlind,
+            gameType:    gameType,
+            tableMode:   tableMode,
+            villainInfo: villainLines.suffix(10).joined(separator: "; ")
+        )
     }
 }
 
-// MARK: - Screen Capture
+// MARK: - LM Studio Client (Qwen 2.5 7B @ localhost:1234)
 
-enum ScreenCapture {
-    /// Captures a specific window as PNG data using /usr/sbin/screencapture.
-    /// Works on all macOS versions, handles full-screen and theater mode.
-    static func capture(windowID: CGWindowID) -> Data? {
-        let tmpPath = NSTemporaryDirectory() +
-            "stakelab_cap_\(windowID)_\(Int.random(in: 1000...9999)).png"
-        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        proc.arguments = ["-l", "\(windowID)", "-x", "-o", "-t", "png", tmpPath]
-        let errPipe = Pipe()
-        proc.standardError = errPipe
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch { return nil }
-
-        if proc.terminationStatus != 0 {
-            // Likely Screen Recording permission not granted
-            return nil
-        }
-        // If file is tiny (< 500 bytes) screencapture produced an empty/black image
-        // This also happens when Screen Recording is denied
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmpPath)),
-              data.count > 500 else { return nil }
-        return data
-    }
-
-}
-
-// MARK: - .env Loader
-
-enum EnvLoader {
-    static func geminiKey() -> String {
-        let home = NSHomeDirectory()
-        let paths = [
-            "\(home)/stakelab-hud/.env",
-            "\(home)/freakslab-poker-hud/.env",
-            "\(home)/.env"
-        ]
-        for path in paths {
-            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-            for raw in text.components(separatedBy: "\n") {
-                let line = raw.trimmingCharacters(in: .whitespaces)
-                guard !line.hasPrefix("#"), line.hasPrefix("GEMINI_API_KEY=") else { continue }
-                return line
-                    .dropFirst("GEMINI_API_KEY=".count)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            }
-        }
-        return ProcessInfo.processInfo.environment["GEMINI_API_KEY"] ?? ""
-    }
-}
-
-// MARK: - Stake Gemini Vision Client
-
-enum StakeGeminiClient {
+enum LMStudioClient {
 
     enum APIError: Swift.Error, LocalizedError {
-        case http(Int, String), parse(String)
+        case http(Int, String), parse(String), unreachable(String)
         var errorDescription: String? {
             switch self {
-            case .http(let c, let b): return "HTTP \(c): \(b.prefix(160))"
-            case .parse(let m):       return "Parse: \(m)"
+            case .http(let c, let b):   return "HTTP \(c): \(b.prefix(160))"
+            case .parse(let m):         return "Parse: \(m)"
+            case .unreachable(let m):   return "LM Studio unreachable: \(m)"
             }
         }
     }
 
+    static let endpoint  = "http://localhost:1234/v1/chat/completions"
+    static let modelName = "qwen2.5-7b-instruct"
+
     static func analyze(
-        imageData: Data,
+        ocrResult: TableOCRResult,
         mode:      String,
-        style:     String,
-        apiKey:    String
+        style:     String
     ) async throws -> PokerAdvice {
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=\(apiKey)"
+
         guard let url = URL(string: endpoint) else {
-            throw APIError.parse("Invalid URL")
+            throw APIError.unreachable("bad URL")
         }
-        var req = URLRequest(url: url, timeoutInterval: 45)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw APIError.http(code, String(data: data, encoding: .utf8) ?? "")
-        }
-        return try parseResponse(data: data)
-    }
 
-    private static func resizeImageData(_ data: Data, maxWidth: CGFloat) -> Data? {
-        guard let src = NSImage(data: data), src.size.width > maxWidth else { return nil }
-        let scale   = maxWidth / src.size.width
-        let newSize = NSSize(width: maxWidth, height: src.size.height * scale)
-        let dst = NSImage(size: newSize)
-        dst.lockFocus()
-        src.draw(in: NSRect(origin: .zero, size: newSize),
-                 from: NSRect(origin: .zero, size: src.size),
-                 operation: .copy, fraction: 1.0)
-        dst.unlockFocus()
-        guard let tiff = dst.tiffRepresentation,
-              let rep  = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75])
-    }
+        let tableJSON = buildTableJSON(ocrResult: ocrResult, mode: mode)
 
-    private static func buildBody(imageData: Data, mode: String, style: String) throws -> Data {
-        // Stake.com UI layout description:
-        // - Dark green felt table, octagonal, 8 seats
-        // - Hero (bottom center): hole cards shown bottom-left of table area
-        // - Community cards: center of table (empty pre-flop)
-        // - Pot: center-top of table in white text
-        // - Action buttons: bottom bar — Fold (red/grey), Check (blue), Raise (green/orange)
-        // - Villain avatars: circular, around table perimeter, stack size below each in white $
-        // - Active player: timer ring highlighted around their seat
-        // - Game info top: "London #3 · NLHE · $0.01/$0.02"
-        // - Cards: standard suit symbols, dark background, colored suits
+        let systemPrompt = """
+You are a live poker HUD engine for Stake.com online poker.
+You receive an OCR-extracted table state JSON from a Stake.com screenshot.
+Coaching style: \(style).
 
-        let prompt = """
-        You are an expert poker coach analyzing a Stake.com online poker screenshot from the Floorp browser.
+Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
+{"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
 
-        STAKE.COM UI LAYOUT (use this to locate elements):
-        - Dark green felt table, octagonal shape, up to 8 player seats around perimeter
-        - Hero seat: BOTTOM CENTER — hole cards shown near hero's seat area
-        - Community cards: CENTER of table (pre-flop = empty, flop/turn/river visible)
-        - Pot size: CENTER-TOP of table in white text (e.g. "$0.05")
-        - Action buttons: BOTTOM BAR — Fold (left), Check/Call (center), Raise/Bet (right)
-        - Villain avatars: circular icons around table perimeter, $ stack below each
-        - Active player: highlighted timer ring around their seat
-        - Game info: top of screen — format "TableName · NLH/PLO · $SB/$BB"
-        - Cards: standard suits (♠♥♦♣), white/colored text on dark card backgrounds
-
-        Game mode: \(mode) | Coaching style: \(style)
-
-        Analyze the screenshot and return ONLY a JSON object — no markdown, no explanation:
-        {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
-
-        Use action WAITING if: no active hand, hero folded, or it is not hero's turn.
-        """
+Use action WAITING if: no active hand, hero has folded, or it is not hero's turn.
+Keep recommendation under 20 words. hint under 12 words.
+"""
 
         let body: [String: Any] = [
-            "contents": [["parts": [
-                ["text": prompt],
-                ["inline_data": [
-                    "mime_type": "image/png",
-                    "data": imageData.base64EncodedString()
-                ]]
-            ]]],
-            "generationConfig": ["temperature": 0.0, "maxOutputTokens": 2000, "responseMimeType": "application/json"]
+            "model": modelName,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user",   "content": tableJSON]
+            ],
+            "temperature": 0.1,
+            "max_tokens":  300
         ]
-        return try JSONSerialization.data(withJSONObject: body)
+
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody   = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: req)
+        } catch {
+            throw APIError.unreachable(error.localizedDescription)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.unreachable("no HTTP response")
+        }
+        guard http.statusCode == 200 else {
+            throw APIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        return try parseResponse(data: data, ocrResult: ocrResult)
     }
 
-    private static func parseResponse(data: Data) throws -> PokerAdvice {
-        guard
-            let root  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let cands = root["candidates"] as? [[String: Any]],
-            let cont  = cands.first?["content"] as? [String: Any],
-            let parts = cont["parts"] as? [[String: Any]],
-            var text  = parts.first?["text"] as? String
-        else { throw APIError.parse("Unexpected Gemini response structure") }
+    private static func buildTableJSON(ocrResult: TableOCRResult, mode: String) -> String {
+        var raw = ocrResult.rawText
+        if raw.count > 1200 { raw = String(raw.prefix(1200)) + "..." }
+        let obj: [String: Any] = [
+            "game_mode":    mode,
+            "game_type":    ocrResult.gameType.isEmpty  ? "NLH"  : ocrResult.gameType,
+            "table_mode":   ocrResult.tableMode.isEmpty ? "CASH" : ocrResult.tableMode,
+            "hero_cards":   ocrResult.heroCards,
+            "board_cards":  ocrResult.boardCards,
+            "pot":          ocrResult.potSize,
+            "hero_stack":   ocrResult.heroStack,
+            "small_blind":  ocrResult.smallBlind,
+            "big_blind":    ocrResult.bigBlind,
+            "villain_info": ocrResult.villainInfo,
+            "raw_ocr_text": raw
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: .prettyPrinted),
+              let str  = String(data: data, encoding: .utf8) else { return "{}" }
+        return str
+    }
 
-        // Strip markdown fences
+    private static func parseResponse(data: Data, ocrResult: TableOCRResult) throws -> PokerAdvice {
+        guard
+            let root    = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let choices = root["choices"] as? [[String: Any]],
+            let message = choices.first?["message"] as? [String: Any],
+            var text    = message["content"] as? String
+        else { throw APIError.parse("Unexpected response: \(String(data: data, encoding: .utf8)?.prefix(200) ?? "")") }
+
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         for fence in ["```json", "```"] {
             if text.hasPrefix(fence) { text = String(text.dropFirst(fence.count)) }
@@ -406,14 +417,11 @@ enum StakeGeminiClient {
         if text.hasSuffix("```") { text = String(text.dropLast(3)) }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Extract and repair JSON
-        // Step 1: strip to first { ... last }
         if let start = text.firstIndex(of: "{") {
             var candidate = String(text[start...])
             if let end = candidate.lastIndex(of: "}") {
                 candidate = String(candidate[...end])
             } else {
-                // Truncated — strip back to last complete field (after last comma)
                 if let lastComma = candidate.lastIndex(of: ",") {
                     candidate = String(candidate[...lastComma].dropLast()) + "}"
                 } else {
@@ -432,6 +440,8 @@ enum StakeGeminiClient {
         let ts  = ISO8601DateFormatter().string(from: Date())
         let id  = Int(Date().timeIntervalSince1970 * 1000) & Int.max
         let act = s("action")
+        let sb  = s("small_blind").isEmpty ? ocrResult.smallBlind : s("small_blind")
+        let bb  = s("big_blind").isEmpty   ? ocrResult.bigBlind   : s("big_blind")
 
         return PokerAdvice(
             id:             id,
@@ -443,14 +453,99 @@ enum StakeGeminiClient {
             confidence:     d["confidence"] as? Int ?? 0,
             hint:           s("hint"),
             timestamp:      ts,
-            smallBlind:     s("small_blind"),
-            bigBlind:       s("big_blind"),
+            smallBlind:     sb,
+            bigBlind:       bb,
             ante:           s("ante"),
             villainNames:   s("villain_names"),
-            gameType:       s("game_type"),
-            tableMode:      s("table_mode").isEmpty ? "CASH" : s("table_mode"),
+            gameType:       s("game_type").isEmpty  ? ocrResult.gameType  : s("game_type"),
+            tableMode:      s("table_mode").isEmpty ? ocrResult.tableMode : s("table_mode"),
             heroHasCards:   (d["hero_has_cards"] as? Bool) ?? (act != "WAITING"),
             actionOnHero:   (d["action_on_hero"] as? Bool) ?? (act != "WAITING" && !act.isEmpty)
         )
+    }
+}
+
+// MARK: - Stake Table Detector
+
+enum StakeTableDetector {
+    static func findStakeWindow() -> (id: CGWindowID, title: String)? {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+
+        var best: (id: CGWindowID, area: CGFloat, title: String)?
+
+        for info in list {
+            guard let owner = info[kCGWindowOwnerName as String] as? String else { continue }
+            let ownerLC = owner.lowercased()
+            guard ownerLC.contains("floorp") || ownerLC == "firefox" else { continue }
+
+            guard
+                let rawID  = info[kCGWindowNumber as String] as? Int,
+                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                let w = bounds["Width"], let h = bounds["Height"],
+                w >= 600, h >= 400
+            else { continue }
+
+            let windowID = CGWindowID(rawID)
+            let area     = w * h
+            let title    = info[kCGWindowName as String] as? String ?? ""
+
+            if best == nil || area > best!.area {
+                best = (id: windowID, area: area, title: title)
+            }
+        }
+        return best.map { (id: $0.id, title: $0.title) }
+    }
+
+    static func findStakeWindowID() -> CGWindowID? { findStakeWindow()?.id }
+
+    static func visibleProcessNames() -> String {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return "unavailable" }
+        var seen = Set<String>()
+        for info in list {
+            if let owner = info[kCGWindowOwnerName as String] as? String { seen.insert(owner) }
+        }
+        return seen.sorted().joined(separator: ", ")
+    }
+
+    static func debugInfo() -> String {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return "CGWindowList unavailable" }
+        var lines: [String] = ["=== Visible Windows ==="]
+        for info in list.prefix(40) {
+            let owner  = info[kCGWindowOwnerName as String] as? String ?? "?"
+            let title  = info[kCGWindowName as String] as? String ?? ""
+            let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            let w = Int(bounds["Width"] ?? 0); let h = Int(bounds["Height"] ?? 0)
+            lines.append("\(owner) | \(w)x\(h) | \(title.prefix(50))")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - Screen Capture
+
+enum ScreenCapture {
+    static func capture(windowID: CGWindowID) -> Data? {
+        let tmpPath = NSTemporaryDirectory() +
+            "stakelab_cap_\(windowID)_\(Int.random(in: 1000...9999)).png"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        proc.arguments = ["-l", "\(windowID)", "-x", "-o", "-t", "png", tmpPath]
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+        do { try proc.run(); proc.waitUntilExit() } catch { return nil }
+
+        if proc.terminationStatus != 0 { return nil }
+
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmpPath)),
+              data.count > 500 else { return nil }
+        return data
     }
 }
