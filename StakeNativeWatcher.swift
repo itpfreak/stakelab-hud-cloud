@@ -35,7 +35,7 @@ extension AdviceStore {
 
     @MainActor
     func setWatcherStatus(_ msg: String) {
-        captureToast = msg
+        // Logs go to watcher.log and the Logs/Diagnostics tab — keeping main HUD view clean
         let logDir  = NSHomeDirectory() + "/Library/Logs/StakeLab"
         let logPath = logDir + "/watcher.log"
         let ts = ISO8601DateFormatter().string(from: Date())
@@ -242,8 +242,6 @@ enum AppleVisionTableReader {
     }
 
     private static func parseOCRItems(items: [TextItem], rawText: String, heroUsername: String) -> TableOCRResult {
-        var heroCards:    [String] = []
-        var boardCards:   [String] = []
         var potSize       = ""
         var heroStack     = ""
         var smallBlind    = ""
@@ -298,9 +296,9 @@ enum AppleVisionTableReader {
         }
 
         // 3. Scan items for game info, pot, cards, and stacks
-        var heroCardCandidates:  [String] = []
-        var boardCardCandidates: [String] = []
-        var heroRankCandidates:  [String] = []
+        var boardCards: [String] = []
+        var nonBoardSuitCards: [(card: String, dist: CGFloat)] = []
+        var nonBoardRankCards: [(card: String, dist: CGFloat)] = []
 
         for item in items {
             let trimmed = item.text.trimmingCharacters(in: .whitespaces)
@@ -330,8 +328,11 @@ enum AppleVisionTableReader {
                 }
             }
 
-            // Skip card extraction on the hero username item to avoid e.g. "J4clubs" matching "4c"
+            // Skip card extraction on hero username item to avoid "J4clubs" matching "4c" or "J"
             if heroFound && (item.text == heroMatchedText || trimmed.lowercased().contains(target)) {
+                continue
+            }
+            if trimmed.lowercased().contains("j4club") {
                 continue
             }
 
@@ -341,27 +342,28 @@ enum AppleVisionTableReader {
             let ix = item.box.midX
             let iy = item.box.midY
 
-            // Distance to hero
-            let distToHero: CGFloat
-            if heroFound {
-                distToHero = hypot(ix - heroX, iy - heroY)
-            } else {
-                distToHero = hypot(ix - 0.5, iy - 0.2)
-            }
-
-            // Center board area: normalized x roughly 0.28...0.72, y roughly 0.38...0.65
+            // Center community board area (Stake table center):
+            // normalized x: 0.28...0.72, y: 0.38...0.65
             let isCenterBoard = (ix >= 0.28 && ix <= 0.72) && (iy >= 0.38 && iy <= 0.65)
+            let distToHero = heroFound ? hypot(ix - heroX, iy - heroY) : hypot(ix - 0.5, iy - 0.2)
 
-            if !cardsWithSuit.isEmpty {
-                if distToHero <= 0.26 && !isCenterBoard {
-                    heroCardCandidates.append(contentsOf: cardsWithSuit)
-                } else if isCenterBoard {
-                    boardCardCandidates.append(contentsOf: cardsWithSuit)
-                } else if !heroFound && heroCardCandidates.isEmpty {
-                    heroCardCandidates.append(contentsOf: cardsWithSuit)
+            if isCenterBoard {
+                if !cardsWithSuit.isEmpty {
+                    boardCards.append(contentsOf: cardsWithSuit)
+                } else if !ranksOnly.isEmpty {
+                    boardCards.append(contentsOf: ranksOnly)
                 }
-            } else if !ranksOnly.isEmpty && distToHero <= 0.22 && !isCenterBoard {
-                heroRankCandidates.append(contentsOf: ranksOnly)
+            } else {
+                // Non-board face-up cards belong to Hero!
+                if !cardsWithSuit.isEmpty {
+                    for c in cardsWithSuit {
+                        nonBoardSuitCards.append((card: c, dist: distToHero))
+                    }
+                } else if !ranksOnly.isEmpty {
+                    for r in ranksOnly {
+                        nonBoardRankCards.append((card: r, dist: distToHero))
+                    }
+                }
             }
 
             // Money / Stacks
@@ -375,11 +377,17 @@ enum AppleVisionTableReader {
             }
         }
 
-        heroCards = heroCardCandidates
-        if heroCards.isEmpty && heroRankCandidates.count >= 2 {
-            heroCards = Array(heroRankCandidates.prefix(2))
+        // Sort non-board cards by proximity to hero seat
+        nonBoardSuitCards.sort { $0.dist < $1.dist }
+        nonBoardRankCards.sort { $0.dist < $1.dist }
+
+        let maxHole = gameType.contains("PLO") ? 4 : 2
+        var heroCards: [String] = []
+        if !nonBoardSuitCards.isEmpty {
+            heroCards = Array(nonBoardSuitCards.prefix(maxHole).map { $0.card })
+        } else if !nonBoardRankCards.isEmpty {
+            heroCards = Array(nonBoardRankCards.prefix(maxHole).map { $0.card })
         }
-        boardCards = boardCardCandidates
 
         return TableOCRResult(
             rawText:         rawText,
@@ -434,14 +442,14 @@ enum LMStudioClient {
 You are a live poker HUD engine for Stake.com online poker.
 You receive an OCR-extracted table state JSON from a Stake.com screenshot.
 Coaching style: \(style).
-Hero username on Stake.com: \(heroUsername).
+Hero username on Stake.com is "\(heroUsername)".
 
 Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
 {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
 
 CRITICAL RULES:
-1. Hero is the player named "\(heroUsername)" (detected at seat \(ocrResult.heroSeat)). Hole cards belong to "\(heroUsername)".
-2. If "hero_cards" has cards, use them as hero hole cards. If "hero_cards" is empty, inspect "raw_ocr_text" near "\(heroUsername)" to identify hero cards. Do NOT confuse hero cards with community board cards in the center!
+1. "\(heroUsername)" is hero's USERNAME, NOT hero's hand! Do NOT output "J4" or "J4 clubs" as the hand unless two distinct cards showing Jack and 4 are actually in "hero_cards".
+2. If "hero_cards" has cards, output them formatted with spaces in "hand" (e.g. "Ah Kd" or "10s 9c"). If "hero_cards" is empty, set "hand" to "".
 3. If "has_action_buttons" is true or action buttons (Fold, Check, Call, Raise, Bet) appear on screen, action_on_hero is TRUE. You MUST output an actionable recommendation (CHECK, CALL, BET, RAISE, FOLD). Do NOT return action WAITING when action buttons are visible!
 4. Only use action "WAITING" if hero has folded or no hand is active.
 5. Keep recommendation under 20 words. hint under 12 words.
@@ -546,11 +554,25 @@ CRITICAL RULES:
         let sb  = s("small_blind").isEmpty ? ocrResult.smallBlind : s("small_blind")
         let bb  = s("big_blind").isEmpty   ? ocrResult.bigBlind   : s("big_blind")
 
+        var hand = s("hand")
+        let cleanH = hand.lowercased().filter { $0.isLetter || $0.isNumber }
+        if cleanH == "j4clubs" || (cleanH == "j4" && ocrResult.heroCards.isEmpty) {
+            hand = ""
+        }
+        if hand.isEmpty && !ocrResult.heroCards.isEmpty {
+            hand = ocrResult.heroCards.joined(separator: " ")
+        }
+
+        var board = s("board")
+        if board.isEmpty && !ocrResult.boardCards.isEmpty {
+            board = ocrResult.boardCards.joined(separator: " ")
+        }
+
         return PokerAdvice(
             id:             id,
-            hand:           s("hand"),
+            hand:           hand,
             position:       s("position"),
-            board:          s("board"),
+            board:          board,
             action:         act,
             recommendation: s("recommendation"),
             confidence:     d["confidence"] as? Int ?? 0,
