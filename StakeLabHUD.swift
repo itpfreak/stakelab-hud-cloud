@@ -217,6 +217,7 @@ final class AdviceStore: ObservableObject {
     private var lastSpokenAdviceId: Int = -1
     private var lastSpokenHand: String = ""
     private var timer: DispatchSourceTimer?
+    private var nativeMode: Bool = false
     let dbPath: String
 
     init() {
@@ -245,9 +246,22 @@ final class AdviceStore: ObservableObject {
         let q = DispatchQueue(label: "poker.hud.poller", qos: .utility)
         let src = DispatchSource.makeTimerSource(queue: q)
         src.schedule(deadline: .now(), repeating: .milliseconds(250))
-        src.setEventHandler { [weak self] in self?.poll() }
+        src.setEventHandler { [weak self] in
+            guard !(self?.nativeMode ?? false) else { return }
+            self?.poll()
+        }
         src.resume()
         timer = src
+    }
+
+    /// Call this when native watcher takes over — stops SQLite polling
+    /// so it doesn't overwrite advice coming from the vision engine.
+    func enableNativeMode() {
+        nativeMode = true
+    }
+
+    func disableNativeMode() {
+        nativeMode = false
     }
 
     private func poll() {
@@ -1836,6 +1850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settings.save()
 
         // ── Native Swift watcher (zero Python) ──────────────────────────────────
+        store.enableNativeMode()   // stop SQLite poll — watcher owns advice updates
         watcherEngine = NativeWatcherEngine(store: store, settings: settings)
         watcherEngine?.start()
 
