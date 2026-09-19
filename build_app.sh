@@ -23,7 +23,9 @@ swiftc \
     -lsqlite3 \
     -framework AppKit \
     -framework Foundation \
-    -framework CryptoKit
+    -framework CryptoKit \
+    -framework Vision \
+    -framework CoreImage
 
 if [ ! -f "$MACOS/StakeLabHUD" ]; then
     echo "❌ Compile failed — binary missing"
