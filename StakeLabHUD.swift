@@ -212,7 +212,7 @@ final class AdviceStore: ObservableObject {
     @Published var positionStats: [PositionStat] = []
 
     private var db: OpaquePointer? = nil
-    private var lastId: Int = -1
+    var lastId: Int = -1  // internal so NativeWatcher extension can update it
     private var lastSpokenText: String = ""
     private var lastSpokenAdviceId: Int = -1
     private var lastSpokenHand: String = ""
