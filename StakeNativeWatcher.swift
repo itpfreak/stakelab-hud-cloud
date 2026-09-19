@@ -119,9 +119,9 @@ final class NativeWatcherEngine {
         guard hash != lastHash else { return }
         lastHash = hash
 
-        // 4. OCR the table with Apple Vision
-        await MainActor.run { self.store.setWatcherStatus("Reading table (Vision OCR)...") }
-        let ocrResult = await AppleVisionTableReader.read(imageData: imageData)
+        // 4. OCR the table with Apple Vision (targeting hero by username)
+        await MainActor.run { self.store.setWatcherStatus("Reading table (Vision OCR)... Searching for hero '\(settings.heroUsername)'") }
+        let ocrResult = await AppleVisionTableReader.read(imageData: imageData, heroUsername: settings.heroUsername)
 
         guard !ocrResult.rawText.isEmpty else {
             await MainActor.run {
@@ -130,14 +130,16 @@ final class NativeWatcherEngine {
             return
         }
 
-        let summary = "OCR: pot=\(ocrResult.potSize.isEmpty ? "-" : ocrResult.potSize) cards=\(ocrResult.heroCards) btns=\(ocrResult.detectedButtons)"
+        let heroStatus = ocrResult.heroFound ? "Hero '\(settings.heroUsername)' [\(ocrResult.heroSeat)]" : "Hero '\(settings.heroUsername)' [searching]"
+        let summary = "\(heroStatus): cards=\(ocrResult.heroCards) pot=\(ocrResult.potSize.isEmpty ? "-" : ocrResult.potSize) btns=\(ocrResult.detectedButtons)"
         await MainActor.run { self.store.setWatcherStatus("\(summary) -> Asking Qwen 2.5...") }
 
         do {
             let advice = try await LMStudioClient.analyze(
-                ocrResult: ocrResult,
-                mode:      settings.gameMode.rawValue,
-                style:     settings.coachingStyle.rawValue
+                ocrResult:    ocrResult,
+                mode:         settings.gameMode.rawValue,
+                style:        settings.coachingStyle.rawValue,
+                heroUsername: settings.heroUsername
             )
             await MainActor.run {
                 self.store.setAdvice(advice)
@@ -176,11 +178,18 @@ struct TableOCRResult {
     var tableMode:       String
     var villainInfo:     String
     var detectedButtons: [String]
+    var heroFound:       Bool
+    var heroSeat:        String
 }
 
 enum AppleVisionTableReader {
 
-    static func read(imageData: Data) async -> TableOCRResult {
+    struct TextItem {
+        let text: String
+        let box:  CGRect
+    }
+
+    static func read(imageData: Data, heroUsername: String) async -> TableOCRResult {
         return await withCheckedContinuation { continuation in
             guard let cgImage = makeCGImage(from: imageData) else {
                 continuation.resume(returning: emptyResult())
@@ -195,14 +204,14 @@ enum AppleVisionTableReader {
                     return
                 }
 
-                var lines: [(text: String, y: CGFloat)] = []
+                var items: [TextItem] = []
                 for obs in observations {
                     guard let top = obs.topCandidates(1).first else { continue }
-                    lines.append((text: top.string, y: obs.boundingBox.minY))
+                    items.append(TextItem(text: top.string, box: obs.boundingBox))
                 }
-                lines.sort { $0.y > $1.y }
-                let rawText = lines.map { $0.text }.joined(separator: "\n")
-                let result  = parseOCRLines(lines.map { $0.text }, rawText: rawText)
+                let sortedItems = items.sorted { $0.box.minY > $1.box.minY }
+                let rawText = sortedItems.map { $0.text }.joined(separator: "\n")
+                let result  = parseOCRItems(items: sortedItems, rawText: rawText, heroUsername: heroUsername)
                 continuation.resume(returning: result)
             }
 
@@ -229,32 +238,57 @@ enum AppleVisionTableReader {
         TableOCRResult(rawText: "", heroCards: [], boardCards: [], potSize: "",
                        heroStack: "", smallBlind: "", bigBlind: "",
                        gameType: "", tableMode: "", villainInfo: "",
-                       detectedButtons: [])
+                       detectedButtons: [], heroFound: false, heroSeat: "")
     }
 
-    private static func parseOCRLines(_ lines: [String], rawText: String) -> TableOCRResult {
-        var heroCards:   [String] = []
-        var boardCards:  [String] = []
-        var potSize      = ""
-        var heroStack    = ""
-        var smallBlind   = ""
-        var bigBlind     = ""
-        var gameType     = "NLH"
-        var tableMode    = "CASH"
+    private static func parseOCRItems(items: [TextItem], rawText: String, heroUsername: String) -> TableOCRResult {
+        var heroCards:    [String] = []
+        var boardCards:   [String] = []
+        var potSize       = ""
+        var heroStack     = ""
+        var smallBlind    = ""
+        var bigBlind      = ""
+        var gameType      = "NLH"
+        var tableMode     = "CASH"
         var villainLines: [String] = []
 
-        let cardPattern  = "(?:10|[2-9TJQKA])[shdc♠♥♦♣♤♡♢♧]"
-        let moneyPattern = "\\$[\\d]+\\.[\\d]{2}"
+        let cardWithSuitPattern = "(?<![a-zA-Z0-9])(?:10|[2-9TJQKA])[shdc♠♥♦♣♤♡♢♧](?![a-zA-Z0-9])"
+        let rankOnlyPattern     = "(?<![a-zA-Z0-9])(?:10|[2-9TJQKA])(?![a-zA-Z0-9])"
+        let moneyPattern        = "\\$[\\d]+\\.[\\d]{2}"
 
         func matches(_ pattern: String, in text: String) -> [String] {
-            guard let re = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
             let range = NSRange(text.startIndex..., in: text)
             return re.matches(in: text, range: range).compactMap {
                 Range($0.range, in: text).map { String(text[$0]) }
             }
         }
 
-        // Detect action buttons
+        // 1. Locate Hero Seat by Username
+        let target = heroUsername.lowercased().filter { $0.isLetter || $0.isNumber }
+        var heroBox: CGRect? = nil
+        var heroMatchedText = ""
+
+        if !target.isEmpty {
+            for item in items {
+                let clean = item.text.lowercased().filter { $0.isLetter || $0.isNumber }
+                guard !clean.isEmpty else { continue }
+                if clean.contains(target) || (target.count >= 4 && target.contains(clean) && clean.count >= 4) {
+                    heroBox = item.box
+                    heroMatchedText = item.text
+                    break
+                }
+            }
+        }
+
+        let heroFound = (heroBox != nil)
+        let heroX = heroBox?.midX ?? 0.5
+        let heroY = heroBox?.midY ?? 0.2
+        let heroSeatStr = heroFound
+            ? "\(Int(heroX * 100))%,\(Int(heroY * 100))%"
+            : "not detected"
+
+        // 2. Action buttons
         let lowerRaw = rawText.lowercased()
         var detectedButtons: [String] = []
         for btn in ["fold", "check", "call", "raise", "bet", "all in", "all-in"] {
@@ -263,8 +297,13 @@ enum AppleVisionTableReader {
             }
         }
 
-        for line in lines {
-            let trimmed  = line.trimmingCharacters(in: .whitespaces)
+        // 3. Scan items for game info, pot, cards, and stacks
+        var heroCardCandidates:  [String] = []
+        var boardCardCandidates: [String] = []
+        var heroRankCandidates:  [String] = []
+
+        for item in items {
+            let trimmed = item.text.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
             let upperLine = trimmed.uppercased()
 
@@ -284,25 +323,63 @@ enum AppleVisionTableReader {
             if trimmed.lowercased().hasPrefix("pot") {
                 let moneys = matches(moneyPattern, in: trimmed)
                 if let p = moneys.first { potSize = p }
-            } else if potSize.isEmpty {
+            } else if potSize.isEmpty && item.box.midY >= 0.45 && item.box.midY <= 0.80 {
                 let moneys = matches(moneyPattern, in: trimmed)
                 if moneys.count == 1 && !trimmed.lowercased().contains("buy") {
                     potSize = moneys[0]
                 }
             }
 
-            let cards = matches(cardPattern, in: trimmed)
-            if !cards.isEmpty {
-                if cards.count == 2 && heroCards.isEmpty { heroCards = cards }
-                else if cards.count >= 3 { boardCards = cards }
+            // Skip card extraction on the hero username item to avoid e.g. "J4clubs" matching "4c"
+            if heroFound && (item.text == heroMatchedText || trimmed.lowercased().contains(target)) {
+                continue
             }
 
+            let cardsWithSuit = matches(cardWithSuitPattern, in: trimmed)
+            let ranksOnly     = matches(rankOnlyPattern, in: trimmed)
+
+            let ix = item.box.midX
+            let iy = item.box.midY
+
+            // Distance to hero
+            let distToHero: CGFloat
+            if heroFound {
+                distToHero = hypot(ix - heroX, iy - heroY)
+            } else {
+                distToHero = hypot(ix - 0.5, iy - 0.2)
+            }
+
+            // Center board area: normalized x roughly 0.28...0.72, y roughly 0.38...0.65
+            let isCenterBoard = (ix >= 0.28 && ix <= 0.72) && (iy >= 0.38 && iy <= 0.65)
+
+            if !cardsWithSuit.isEmpty {
+                if distToHero <= 0.26 && !isCenterBoard {
+                    heroCardCandidates.append(contentsOf: cardsWithSuit)
+                } else if isCenterBoard {
+                    boardCardCandidates.append(contentsOf: cardsWithSuit)
+                } else if !heroFound && heroCardCandidates.isEmpty {
+                    heroCardCandidates.append(contentsOf: cardsWithSuit)
+                }
+            } else if !ranksOnly.isEmpty && distToHero <= 0.22 && !isCenterBoard {
+                heroRankCandidates.append(contentsOf: ranksOnly)
+            }
+
+            // Money / Stacks
             let moneys = matches(moneyPattern, in: trimmed)
             if !moneys.isEmpty && trimmed != potSize {
-                villainLines.append(trimmed)
-                heroStack = moneys.last ?? heroStack
+                if distToHero <= 0.22 && heroStack.isEmpty {
+                    heroStack = moneys.first ?? ""
+                } else {
+                    villainLines.append(trimmed)
+                }
             }
         }
+
+        heroCards = heroCardCandidates
+        if heroCards.isEmpty && heroRankCandidates.count >= 2 {
+            heroCards = Array(heroRankCandidates.prefix(2))
+        }
+        boardCards = boardCardCandidates
 
         return TableOCRResult(
             rawText:         rawText,
@@ -315,7 +392,9 @@ enum AppleVisionTableReader {
             gameType:        gameType,
             tableMode:       tableMode,
             villainInfo:     villainLines.suffix(10).joined(separator: "; "),
-            detectedButtons: detectedButtons
+            detectedButtons: detectedButtons,
+            heroFound:       heroFound,
+            heroSeat:        heroSeatStr
         )
     }
 }
@@ -339,30 +418,33 @@ enum LMStudioClient {
     static let modelName = "qwen2.5-7b-instruct"
 
     static func analyze(
-        ocrResult: TableOCRResult,
-        mode:      String,
-        style:     String
+        ocrResult:    TableOCRResult,
+        mode:         String,
+        style:        String,
+        heroUsername: String
     ) async throws -> PokerAdvice {
 
         guard let url = URL(string: endpoint) else {
             throw APIError.unreachable("bad URL")
         }
 
-        let tableJSON = buildTableJSON(ocrResult: ocrResult, mode: mode)
+        let tableJSON = buildTableJSON(ocrResult: ocrResult, mode: mode, heroUsername: heroUsername)
 
         let systemPrompt = """
 You are a live poker HUD engine for Stake.com online poker.
 You receive an OCR-extracted table state JSON from a Stake.com screenshot.
 Coaching style: \(style).
+Hero username on Stake.com: \(heroUsername).
 
 Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
 {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
 
 CRITICAL RULES:
-1. If "has_action_buttons" is true or action buttons (Fold, Check, Call, Raise, Bet) appear in "raw_ocr_text", action_on_hero is TRUE. You MUST give an actionable recommendation (CHECK, CALL, BET, RAISE, FOLD). Do NOT return action WAITING when action buttons are visible!
-2. If "hero_cards" is empty, inspect "raw_ocr_text" to find card ranks/suits or board cards. If cards cannot be read with certainty, recommend the best move (e.g. CHECK if free, or FOLD) based on visible context.
-3. If hero has folded or no active hand is being played, use action "WAITING" and action_on_hero false. Still populate hand, position, board, blinds, and a brief recommendation like "Waiting for next hand".
-4. Keep recommendation under 20 words. hint under 12 words.
+1. Hero is the player named "\(heroUsername)" (detected at seat \(ocrResult.heroSeat)). Hole cards belong to "\(heroUsername)".
+2. If "hero_cards" has cards, use them as hero hole cards. If "hero_cards" is empty, inspect "raw_ocr_text" near "\(heroUsername)" to identify hero cards. Do NOT confuse hero cards with community board cards in the center!
+3. If "has_action_buttons" is true or action buttons (Fold, Check, Call, Raise, Bet) appear on screen, action_on_hero is TRUE. You MUST output an actionable recommendation (CHECK, CALL, BET, RAISE, FOLD). Do NOT return action WAITING when action buttons are visible!
+4. Only use action "WAITING" if hero has folded or no hand is active.
+5. Keep recommendation under 20 words. hint under 12 words.
 """
 
         let body: [String: Any] = [
@@ -397,10 +479,13 @@ CRITICAL RULES:
         return try parseResponse(data: data, ocrResult: ocrResult)
     }
 
-    private static func buildTableJSON(ocrResult: TableOCRResult, mode: String) -> String {
+    private static func buildTableJSON(ocrResult: TableOCRResult, mode: String, heroUsername: String) -> String {
         var raw = ocrResult.rawText
         if raw.count > 1200 { raw = String(raw.prefix(1200)) + "..." }
         let obj: [String: Any] = [
+            "hero_username":           heroUsername,
+            "hero_seat_detected":      ocrResult.heroFound,
+            "hero_seat_coordinates":   ocrResult.heroSeat,
             "game_mode":               mode,
             "game_type":               ocrResult.gameType.isEmpty  ? "NLH"  : ocrResult.gameType,
             "table_mode":              ocrResult.tableMode.isEmpty ? "CASH" : ocrResult.tableMode,
