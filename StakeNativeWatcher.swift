@@ -174,8 +174,11 @@ final class NativeWatcherEngine {
 // MARK: - Purple Card Blob Detector
 
 /// Detects colored card backs by scanning for a configurable target color,
-/// clusters matching pixels into card-sized blobs, classifies them as hero
-/// (bottom zone) or board (center zone), then crops each card face for OCR.
+/// clusters matching pixels into card-sized blobs, then returns them sorted
+/// by distance from an anchor point (the hero's username bounding box center).
+///
+/// This anchor approach means window size, seat position, and browser chrome
+/// are all irrelevant — cards are always found relative to the username label.
 ///
 /// To change the card-back color: update cardBackR/G/B to match your Stake setting.
 /// Purple (132, 24, 245) is the recommended color — distinct from all table elements.
@@ -194,22 +197,29 @@ enum PurpleCardDetector {
     /// Minimum clustered pixel count for a blob to count as a card.
     static let minBlobPixels: Int = 8
 
+    /// Max normalized distance from anchor for hero card blobs.
+    /// Cards are typically 0.05–0.20 units from the username label.
+    static let heroSearchRadius: CGFloat = 0.25
+
+    /// Max normalized distance from image center for board card blobs.
+    static let boardSearchRadius: CGFloat = 0.35
+
     // ── Public types ────────────────────────────────────────────────────────
 
     struct CardBlob {
-        let centerX:     CGFloat   // normalized 0–1 relative to table width
-        let centerY:     CGFloat   // normalized 0–1
-        let isHero:      Bool      // true = hero hand (y > 58%), false = board (y 28–58%)
-        let tableScaleX: CGFloat   // tableRightX / imgW — used by cropCard
+        let centerX: CGFloat   // normalized 0–1 (full image)
+        let centerY: CGFloat   // normalized 0–1 (full image)
+        let isHero:  Bool
     }
 
     // ── Public entry point ──────────────────────────────────────────────────
 
-    /// Returns detected card blobs from a CGImage.
-    /// Automatically detects the poker table right boundary so that Floorp
-    /// browser chrome (sidebar, UI panels) on the right is excluded from
-    /// coordinate normalization.
-    static func detect(cgImage: CGImage) -> [CardBlob] {
+    /// Returns detected card blobs.
+    /// - heroAnchor: normalized (x,y) of the hero's username label from VNRecognize.
+    ///   Hero blobs are those within heroSearchRadius of this point.
+    ///   Board blobs are those within boardSearchRadius of image center y=0.45.
+    static func detect(cgImage: CGImage,
+                       heroAnchor: CGPoint) -> [CardBlob] {
         guard
             let dataRef = cgImage.dataProvider?.data,
             let ptr     = CFDataGetBytePtr(dataRef)
@@ -217,46 +227,15 @@ enum PurpleCardDetector {
 
         let imgW = cgImage.width
         let imgH = cgImage.height
-        let bpp  = cgImage.bitsPerPixel / 8   // bytes per pixel (3 or 4)
+        let bpp  = cgImage.bitsPerPixel / 8
         let bpr  = cgImage.bytesPerRow
 
-        // ── Auto-detect table right edge ────────────────────────────────────
-        // Floorp browser chrome on the right side is a uniform dark color
-        // identical to the table felt (32-58, 36-60, 50-74). Scan several
-        // horizontal strips from right→left to find where "table" content ends
-        // and the browser chrome begins. We look for the first x column (from
-        // the right) that contains any non-dark pixel, which marks table content.
-        // If the whole image is table, tableRightX == imgW.
-        func isDarkChrome(_ r: Int, _ g: Int, _ b: Int) -> Bool {
-            // Table felt + Floorp chrome are both dark blue-gray in this range
-            return r < 80 && g < 80 && b < 90
-        }
-
-        var tableRightX = imgW
-        let stripeYs = [imgH / 4, imgH / 2, imgH * 3 / 4]
-        // Scan right→left at three y levels; stop at first non-dark column
-        outer: for x in stride(from: imgW - 1, through: imgW * 4 / 10, by: -1) {
-            var allDark = true
-            for sy in stripeYs {
-                let off = sy * bpr + x * bpp
-                let r = Int(ptr[off]); let g = Int(ptr[off+1]); let b = Int(ptr[off+2])
-                if !isDarkChrome(r, g, b) { allDark = false; break }
-            }
-            if !allDark { tableRightX = x + 1; break outer }
-        }
-
-        // Clamp: table must be at least 40% of image width (sanity check)
-        if tableRightX < imgW * 4 / 10 { tableRightX = imgW }
-
-        // Step 1: Collect matching pixel coords within table bounds (sample every 2px)
+        // Step 1: Collect all purple pixel hits (sample every 2px for speed)
         var hits: [(x: Int, y: Int)] = []
-        let step = 2
-        for y in stride(from: 0, to: imgH, by: step) {
-            for x in stride(from: 0, to: tableRightX, by: step) {
-                let offset = y * bpr + x * bpp
-                let r = Int(ptr[offset])
-                let g = Int(ptr[offset + 1])
-                let b = Int(ptr[offset + 2])
+        for y in stride(from: 0, to: imgH, by: 2) {
+            for x in stride(from: 0, to: imgW, by: 2) {
+                let off = y * bpr + x * bpp
+                let r = Int(ptr[off]); let g = Int(ptr[off+1]); let b = Int(ptr[off+2])
                 if abs(r - cardBackR) <= colorTolerance &&
                    abs(g - cardBackG) <= colorTolerance &&
                    abs(b - cardBackB) <= colorTolerance {
@@ -266,19 +245,16 @@ enum PurpleCardDetector {
         }
         guard !hits.isEmpty else { return [] }
 
-        // Step 2: Cluster by proximity using a coarse bucket grid (~3% of image width)
+        // Step 2: Cluster into blobs via coarse bucket grid + BFS
         let bucketSize = max(1, imgW / 33)
         var buckets: [Int: [Int: [(Int, Int)]]] = [:]
         for h in hits {
-            let bx = h.x / bucketSize
-            let by = h.y / bucketSize
-            buckets[bx, default: [:]][by, default: []].append((h.x, h.y))
+            buckets[h.x / bucketSize, default: [:]][h.y / bucketSize, default: []]
+                .append((h.x, h.y))
         }
 
-        // BFS merge of adjacent buckets into blobs
         var visited = Set<String>()
         var blobs:   [[(Int, Int)]] = []
-
         for (bx, col) in buckets {
             for (by, _) in col {
                 let key = "\(bx)_\(by)"
@@ -293,10 +269,9 @@ enum PurpleCardDetector {
                     if let pixels = buckets[cx]?[cy] { blob.append(contentsOf: pixels) }
                     for dx in -1...1 {
                         for dy in -1...1 {
-                            let nx = cx + dx; let ny = cy + dy
-                            let nk = "\(nx)_\(ny)"
-                            if !visited.contains(nk), buckets[nx]?[ny] != nil {
-                                queue.append((nx, ny))
+                            let nk = "\(cx+dx)_\(cy+dy)"
+                            if !visited.contains(nk), buckets[cx+dx]?[cy+dy] != nil {
+                                queue.append((cx+dx, cy+dy))
                             }
                         }
                     }
@@ -305,41 +280,42 @@ enum PurpleCardDetector {
             }
         }
 
-        // Step 3: Compute blob centers and zone-classify
-        // Normalize against tableRightX (not imgW) so coords are table-relative
-        let fW = CGFloat(tableRightX)
-        let fH = CGFloat(imgH)
+        // Step 3: Compute normalized centers and classify by anchor proximity
+        let fW = CGFloat(imgW); let fH = CGFloat(imgH)
+
+        // Board anchor = center of image horizontally, upper half vertically
+        let boardAnchor = CGPoint(x: 0.5, y: 0.45)
 
         return blobs.compactMap { blob -> CardBlob? in
             let sumX = blob.reduce(0) { $0 + $1.0 }
             let sumY = blob.reduce(0) { $0 + $1.1 }
-            let cx   = CGFloat(sumX) / CGFloat(blob.count) / fW
-            let cy   = CGFloat(sumY) / CGFloat(blob.count) / fH
-            // Board zone: y 28–58% | Hero zone: y 58–82% | Ignore UI chrome outside these
-            guard cy >= 0.28 && cy <= 0.82 else { return nil }
-            let scaleX = CGFloat(tableRightX) / CGFloat(imgW)
-            return CardBlob(centerX: cx, centerY: cy, isHero: cy > 0.58, tableScaleX: scaleX)
+            let cx = CGFloat(sumX) / CGFloat(blob.count) / fW
+            let cy = CGFloat(sumY) / CGFloat(blob.count) / fH
+
+            let distHero  = hypot(cx - heroAnchor.x, cy - heroAnchor.y)
+            let distBoard = hypot(cx - boardAnchor.x, cy - boardAnchor.y)
+
+            if distHero <= heroSearchRadius {
+                return CardBlob(centerX: cx, centerY: cy, isHero: true)
+            } else if distBoard <= boardSearchRadius && cy < heroAnchor.y - 0.05 {
+                // Board cards must be above the hero seat
+                return CardBlob(centerX: cx, centerY: cy, isHero: false)
+            }
+            return nil
         }
     }
 
     // ── Card crop ───────────────────────────────────────────────────────────
 
     /// Crops a region around a blob center for per-card OCR.
-    /// blob.centerX is table-relative (0–1 of table width), so we multiply by
-    /// tableScaleX to convert back to full-image pixel coordinates.
     static func cropCard(cgImage: CGImage, blob: CardBlob,
                          cardW: CGFloat = 0.10, cardH: CGFloat = 0.12) -> CGImage? {
-        let imgW   = CGFloat(cgImage.width)
-        let imgH   = CGFloat(cgImage.height)
-        // Convert table-relative centerX back to full-image coords
-        let absX   = blob.centerX * blob.tableScaleX * imgW
-        let absY   = blob.centerY * imgH
-        let halfW  = cardW * blob.tableScaleX * imgW / 2
-        let halfH  = cardH * imgH / 2
-        let x = max(0, absX - halfW)
-        let y = max(0, absY - halfH)
-        let w = min(halfW * 2, imgW - x)
-        let h = min(halfH * 2, imgH - y)
+        let imgW = CGFloat(cgImage.width)
+        let imgH = CGFloat(cgImage.height)
+        let x = max(0, (blob.centerX - cardW / 2) * imgW)
+        let y = max(0, (blob.centerY - cardH / 2) * imgH)
+        let w = min(cardW * imgW, imgW - x)
+        let h = min(cardH * imgH, imgH - y)
         guard w > 10, h > 10 else { return nil }
         return cgImage.cropping(to: CGRect(x: x, y: y, width: w, height: h))
     }
@@ -379,8 +355,27 @@ enum AppleVisionTableReader {
             return emptyResult()
         }
 
-        // Stage 1: Detect colored card-back blobs
-        let blobs = PurpleCardDetector.detect(cgImage: cgImage)
+        // Stage 1: Run full-image OCR first to find hero username anchor
+        let items   = await ocrFullImage(cgImage: cgImage)
+        let rawText = items.sorted { $0.box.minY > $1.box.minY }
+                          .map { $0.text }.joined(separator: "\n")
+
+        // Stage 2: Locate hero anchor from username bounding box
+        var heroAnchor = CGPoint(x: 0.5, y: 0.75)  // fallback: bottom-center
+        let target = heroUsername.lowercased().filter { $0.isLetter || $0.isNumber }
+        if !target.isEmpty {
+            for item in items {
+                let clean = item.text.lowercased().filter { $0.isLetter || $0.isNumber }
+                if clean.contains(target) || (target.count >= 4 && target.contains(clean) && clean.count >= 4) {
+                    // VNRecognize boundingBox origin is bottom-left, y flipped
+                    heroAnchor = CGPoint(x: item.box.midX, y: 1.0 - item.box.midY)
+                    break
+                }
+            }
+        }
+
+        // Stage 3: Detect colored card-back blobs anchored to hero username position
+        let blobs = PurpleCardDetector.detect(cgImage: cgImage, heroAnchor: heroAnchor)
 
         let heroBlobs  = blobs.filter {  $0.isHero }.sorted { $0.centerX < $1.centerX }
         let boardBlobs = blobs.filter { !$0.isHero }.sorted { $0.centerX < $1.centerX }
@@ -403,13 +398,8 @@ enum AppleVisionTableReader {
             }
         }
 
-        let tableScale = blobs.first.map { String(format: "%.0f%%", $0.tableScaleX * 100) } ?? "100%"
-        let cardSource = blobs.isEmpty ? "ocr-only" : "blob+ocr(\(blobs.count)blobs,tbl=\(tableScale))"
-
-        // Stage 3: Full-image OCR for table metadata (pot, blinds, buttons, stacks)
-        let items   = await ocrFullImage(cgImage: cgImage)
-        let rawText = items.sorted { $0.box.minY > $1.box.minY }
-                          .map { $0.text }.joined(separator: "\n")
+        let anchorStr = String(format: "%.2f,%.2f", heroAnchor.x, heroAnchor.y)
+        let cardSource = blobs.isEmpty ? "ocr-only" : "blob+ocr(\(blobs.count)blobs,anchor=\(anchorStr))"
 
         // Stage 4: Parse metadata
         var result = parseMetadata(items: items, rawText: rawText, heroUsername: heroUsername)
