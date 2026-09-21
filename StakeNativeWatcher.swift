@@ -229,16 +229,16 @@ enum AppleVisionTableReader {
             let boxW = heroBox.size.width
 
             // Cards are centered horizontally with username, positioned directly above it
-            let cardCropW: CGFloat = max(0.13, boxW * 1.6)
-            let cardCropH: CGFloat = 0.14
+            let cardCropW: CGFloat = max(0.16, boxW * 2.0)
+            let cardCropH: CGFloat = 0.16
             let cardCenterX: CGFloat = topDownX + (boxW / 2.0)
-            let cardCenterY: CGFloat = topDownY - (cardCropH * 0.45)
+            let cardCenterY: CGFloat = topDownY - (cardCropH * 0.50)
 
             let cropRect = CGRect(
                 x: max(0, (cardCenterX - cardCropW / 2.0) * imgW),
                 y: max(0, (cardCenterY - cardCropH / 2.0) * imgH),
-                width: min(cardCropW * imgW, imgW),
-                height: min(cardCropH * imgH, imgH)
+                width: min(cardCropW * imgW, imgW - max(0, (cardCenterX - cardCropW / 2.0) * imgW)),
+                height: min(cardCropH * imgH, imgH - max(0, (cardCenterY - cardCropH / 2.0) * imgH))
             )
 
             if let heroCardsCrop = cgImage.cropping(to: cropRect) {
@@ -248,13 +248,13 @@ enum AppleVisionTableReader {
         }
 
         // Stage 3: Community Board Cards Crop & Read
-        // Board cards are in the middle of the table felt (x: 0.18..0.60, y: 0.28..0.58)
+        // Covers center table felt across all table zoom levels and scrolls (x: 0.16..0.62, y: 0.22..0.72)
         var boardCards: [String] = []
         let boardCropRect = CGRect(
-            x: max(0, 0.18 * imgW),
-            y: max(0, 0.28 * imgH),
-            width: min(0.44 * imgW, imgW),
-            height: min(0.30 * imgH, imgH)
+            x: max(0, 0.16 * imgW),
+            y: max(0, 0.22 * imgH),
+            width: min(0.46 * imgW, imgW - max(0, 0.16 * imgW)),
+            height: min(0.50 * imgH, imgH - max(0, 0.22 * imgH))
         )
         if let boardCrop = cgImage.cropping(to: boardCropRect) {
             boardCards = await extractCards(from: boardCrop, maxCards: 5, isHero: false)
@@ -288,21 +288,21 @@ enum AppleVisionTableReader {
                 // Sort text observations horizontally left-to-right
                 let sortedObs = obs.sorted { $0.boundingBox.minX < $1.boundingBox.minX }
 
-                var cards: [String] = []
-                let suitMap: [Character: Character] = [
+                var rawTokens: [(rank: String, suit: String, box: CGRect)] = []
+                let suitMap: [Character: String] = [
                     "♠": "s", "♤": "s",
                     "♥": "h", "♡": "h",
                     "♦": "d", "♢": "d",
-                    "♣": "c", "♧": "c"
+                    "♣": "c", "♧": "c",
+                    "s": "s", "h": "h", "d": "d", "c": "c"
                 ]
 
-                let rankSuitPattern = "\\b(10|[2-9TJQKA])[shdc]\\b"
-                let rankOnlyPattern = "\\b(10|[2-9TJQKA])\\b"
-                let reRankSuit = try? NSRegularExpression(pattern: rankSuitPattern, options: [.caseInsensitive])
-                let reRankOnly = try? NSRegularExpression(pattern: rankOnlyPattern, options: [.caseInsensitive])
-
-                let cropW = CGFloat(cgImage.width)
-                let cropH = CGFloat(cgImage.height)
+                // Robust regex: matches rank + optional suit even when tokens are contiguous (A3, Ad3d, 6♥4♠7♥Q♥, K8)
+                let cardPattern = "(10|[2-9TJQKA])\\s*([shdc♠♥♦♣♤♡♢♧]?)"
+                guard let re = try? NSRegularExpression(pattern: cardPattern, options: [.caseInsensitive]) else {
+                    cont.resume(returning: [])
+                    return
+                }
 
                 for ob in sortedObs {
                     guard let top = ob.topCandidates(1).first else { continue }
@@ -314,65 +314,61 @@ enum AppleVisionTableReader {
                         continue
                     }
 
-                    // Normalize unicode suit glyphs
-                    var normalized = ""
-                    for ch in rawText {
-                        if let s = suitMap[ch] { normalized.append(s) }
-                        else { normalized.append(ch) }
-                    }
+                    let ns = rawText as NSString
+                    let matches = re.matches(in: rawText, range: NSRange(location: 0, length: ns.length))
+                    for m in matches {
+                        guard m.numberOfRanges >= 2 else { continue }
+                        let rankRange = m.range(at: 1)
+                        guard rankRange.location != NSNotFound else { continue }
+                        let rank = ns.substring(with: rankRange).uppercased()
 
-                    // 1. Try matching Rank + Suit (e.g. "Ad", "3d", "Kh", "8s", "2s")
-                    if let re = reRankSuit {
-                        let ns = normalized as NSString
-                        let matches = re.matches(in: normalized, range: NSRange(location: 0, length: ns.length))
-                        for m in matches {
-                            var token = ns.substring(with: m.range)
-                            if token.count >= 2 {
-                                let rank = String(token.prefix(token.count - 1)).uppercased()
-                                let suit = String(token.suffix(1)).lowercased()
-                                token = rank + suit
-                            }
-                            if !cards.contains(token) || isHero {
-                                cards.append(token)
+                        var suit = ""
+                        if m.numberOfRanges >= 3 && m.range(at: 2).location != NSNotFound {
+                            let suitChar = ns.substring(with: m.range(at: 2)).lowercased()
+                            if let s = suitMap[suitChar.first ?? " "] {
+                                suit = s
                             }
                         }
+                        rawTokens.append((rank: rank, suit: suit, box: ob.boundingBox))
                     }
-
-                    // 2. If no rank+suit match, try Rank only and detect suit from pixel color
-                    if cards.count < maxCards, let re = reRankOnly {
-                        let ns = normalized as NSString
-                        let matches = re.matches(in: normalized, range: NSRange(location: 0, length: ns.length))
-                        for m in matches {
-                            let rank = ns.substring(with: m.range).uppercased()
-                            if cards.contains(where: { $0.hasPrefix(rank) }) { continue }
-
-                            // Sample pixels around this text observation to detect card suit color
-                            let obBox = ob.boundingBox
-                            let pixelRect = CGRect(
-                                x: obBox.origin.x * cropW,
-                                y: (1.0 - obBox.origin.y - obBox.height) * cropH,
-                                width: obBox.width * cropW,
-                                height: obBox.height * cropH
-                            ).insetBy(dx: -20, dy: -20)
-
-                            var suit = detectSuitFromColor(cgImage: cgImage, in: pixelRect)
-                            if suit.isEmpty && isHero {
-                                // Fallback: sample left half vs right half of hero cards crop
-                                let halfRect = obBox.origin.x < 0.5
-                                    ? CGRect(x: 0, y: 0, width: cropW / 2, height: cropH)
-                                    : CGRect(x: cropW / 2, y: 0, width: cropW / 2, height: cropH)
-                                suit = detectSuitFromColor(cgImage: cgImage, in: halfRect)
-                            }
-
-                            let cardToken = rank + (suit.isEmpty ? "" : suit)
-                            cards.append(cardToken)
-                        }
-                    }
-
-                    if cards.count >= maxCards { break }
                 }
 
-                cont.resume(returning: Array(cards.prefix(maxCards)))
+                let cropW = CGFloat(cgImage.width)
+                let cropH = CGFloat(cgImage.height)
+                var finalCards: [String] = []
+
+                if isHero {
+                    // Hero cards: maxCards (2 in NLH, 4 in PLO)
+                    // If suit was not recognized by text OCR, sample pixel colors:
+                    // Token 0 -> left half of crop, Token 1 -> right half of crop
+                    for (idx, token) in rawTokens.prefix(maxCards).enumerated() {
+                        var suit = token.suit
+                        if suit.isEmpty {
+                            let halfW = cropW / CGFloat(max(1, min(maxCards, 2)))
+                            let sampleRect = CGRect(x: CGFloat(idx) * halfW, y: 0, width: halfW, height: cropH)
+                            suit = detectSuitFromColor(cgImage: cgImage, in: sampleRect)
+                        }
+                        finalCards.append(token.rank + (suit.isEmpty ? "s" : suit))
+                    }
+                } else {
+                    // Board cards: up to 5 cards (Flop 3, Turn 4, River 5)
+                    for token in rawTokens.prefix(maxCards) {
+                        var suit = token.suit
+                        if suit.isEmpty {
+                            let obBox = token.box
+                            let pixelRect = CGRect(
+                                x: max(0, obBox.origin.x * cropW - 20),
+                                y: max(0, (1.0 - obBox.origin.y - obBox.height) * cropH - 20),
+                                width: min(obBox.width * cropW + 40, cropW),
+                                height: min(obBox.height * cropH + 40, cropH)
+                            )
+                            suit = detectSuitFromColor(cgImage: cgImage, in: pixelRect)
+                        }
+                        finalCards.append(token.rank + (suit.isEmpty ? "s" : suit))
+                    }
+                }
+
+                cont.resume(returning: finalCards)
             }
 
             req.recognitionLevel       = .accurate
