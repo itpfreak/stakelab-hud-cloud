@@ -1,19 +1,21 @@
 // StakeNativeWatcher.swift
-// Native Swift screen capture + Purple-blob card detection + Apple Vision OCR + Local Qwen 2.5
+// Native Swift screen capture + Seat-Anchor Card Detection + Apple Vision OCR + Local Qwen 2.5
 // Target: Floorp browser (Firefox-based) running Stake.com poker tables
 //
 // Architecture:
-//   Stage 1 — ScreenCapture:        /usr/sbin/screencapture grabs Floorp window PNG
-//   Stage 2 — PurpleCardDetector:   Scans for colored card-back blobs (purple by default),
-//                                    classifies them as hero or board, crops each card face,
-//                                    then runs VNRecognizeTextRequest on each small crop.
-//   Stage 3 — AppleVisionTableReader: Reads all remaining table text (pot, blinds, buttons,
-//                                    stacks, player names) from the full image.
-//   Stage 4 — LMStudioClient:        Structured table JSON -> Qwen 2.5 7B @ localhost:1234
+//   Stage 1 — ScreenCapture:          /usr/sbin/screencapture grabs Floorp window PNG
+//   Stage 2 — Full-Image OCR:         VNRecognizeTextRequest scans table for text, locating:
+//                                     - Hero username ("J4clubs") bounding box
+//                                     - Pot size, blinds, action buttons, stacks
+//   Stage 3 — Hero Cards Crop:        Takes a tight crop DIRECTLY ABOVE the hero's username
+//                                     bounding box (regardless of what seat hero is in)
+//                                     and extracts the 2 hole cards via OCR + 4-color suit check.
+//   Stage 4 — Board Cards Crop:       Takes a crop of the middle felt (community cards)
+//                                     and extracts flop/turn/river cards.
+//   Stage 5 — Strategy Advice:        Structured table JSON -> Qwen 2.5 7B @ localhost:1234
 //
-// Card back color requirement: Set your Stake.com card back to any solid color
-// (purple recommended). Configure PurpleCardDetector constants to match if you change it.
 // Zero cloud. Zero API key. Zero token cost.
+// Works with any seat position, window size, or deck colors (standard & 4-color).
 // Requires: macOS 12+, Screen Recording permission, LM Studio running on port 1234
 
 import AppKit
@@ -124,8 +126,8 @@ final class NativeWatcherEngine {
         guard hash != lastHash else { return }
         lastHash = hash
 
-        // 4. Read table: purple blob card detection + full-image text OCR
-        await MainActor.run { self.store.setWatcherStatus("Reading table (blob+OCR)... hero='\(settings.heroUsername)'") }
+        // 4. Read table: locate hero username -> crop cards directly above it + crop board
+        await MainActor.run { self.store.setWatcherStatus("Reading table (seat-anchor)... hero='\(settings.heroUsername)'") }
         let ocrResult = await AppleVisionTableReader.read(imageData: imageData, heroUsername: settings.heroUsername)
 
         guard !ocrResult.rawText.isEmpty || !ocrResult.heroCards.isEmpty else {
@@ -171,156 +173,6 @@ final class NativeWatcherEngine {
     }
 }
 
-// MARK: - Purple Card Blob Detector
-
-/// Detects colored card backs by scanning for a configurable target color,
-/// clusters matching pixels into card-sized blobs, then returns them sorted
-/// by distance from an anchor point (the hero's username bounding box center).
-///
-/// This anchor approach means window size, seat position, and browser chrome
-/// are all irrelevant — cards are always found relative to the username label.
-///
-/// To change the card-back color: update cardBackR/G/B to match your Stake setting.
-/// Purple (132, 24, 245) is the recommended color — distinct from all table elements.
-enum PurpleCardDetector {
-
-    // ── Tunable constants ───────────────────────────────────────────────────
-
-    /// Target card-back color (sRGB 0–255). Default = Stake purple (132, 24, 245).
-    static let cardBackR: Int = 132
-    static let cardBackG: Int =  24
-    static let cardBackB: Int = 245
-
-    /// Per-channel tolerance for color matching.
-    static let colorTolerance: Int = 40
-
-    /// Minimum clustered pixel count for a blob to count as a card.
-    static let minBlobPixels: Int = 8
-
-    /// Max normalized distance from anchor for hero card blobs.
-    /// Cards are typically 0.05–0.20 units from the username label.
-    static let heroSearchRadius: CGFloat = 0.25
-
-    /// Max normalized distance from image center for board card blobs.
-    static let boardSearchRadius: CGFloat = 0.35
-
-    // ── Public types ────────────────────────────────────────────────────────
-
-    struct CardBlob {
-        let centerX: CGFloat   // normalized 0–1 (full image)
-        let centerY: CGFloat   // normalized 0–1 (full image)
-        let isHero:  Bool
-    }
-
-    // ── Public entry point ──────────────────────────────────────────────────
-
-    /// Returns detected card blobs.
-    /// - heroAnchor: normalized (x,y) of the hero's username label from VNRecognize.
-    ///   Hero blobs are those within heroSearchRadius of this point.
-    ///   Board blobs are those within boardSearchRadius of image center y=0.45.
-    static func detect(cgImage: CGImage,
-                       heroAnchor: CGPoint) -> [CardBlob] {
-        guard
-            let dataRef = cgImage.dataProvider?.data,
-            let ptr     = CFDataGetBytePtr(dataRef)
-        else { return [] }
-
-        let imgW = cgImage.width
-        let imgH = cgImage.height
-        let bpp  = cgImage.bitsPerPixel / 8
-        let bpr  = cgImage.bytesPerRow
-
-        // Step 1: Collect all purple pixel hits (sample every 2px for speed)
-        var hits: [(x: Int, y: Int)] = []
-        for y in stride(from: 0, to: imgH, by: 2) {
-            for x in stride(from: 0, to: imgW, by: 2) {
-                let off = y * bpr + x * bpp
-                let r = Int(ptr[off]); let g = Int(ptr[off+1]); let b = Int(ptr[off+2])
-                if abs(r - cardBackR) <= colorTolerance &&
-                   abs(g - cardBackG) <= colorTolerance &&
-                   abs(b - cardBackB) <= colorTolerance {
-                    hits.append((x, y))
-                }
-            }
-        }
-        guard !hits.isEmpty else { return [] }
-
-        // Step 2: Cluster into blobs via coarse bucket grid + BFS
-        let bucketSize = max(1, imgW / 33)
-        var buckets: [Int: [Int: [(Int, Int)]]] = [:]
-        for h in hits {
-            buckets[h.x / bucketSize, default: [:]][h.y / bucketSize, default: []]
-                .append((h.x, h.y))
-        }
-
-        var visited = Set<String>()
-        var blobs:   [[(Int, Int)]] = []
-        for (bx, col) in buckets {
-            for (by, _) in col {
-                let key = "\(bx)_\(by)"
-                guard !visited.contains(key) else { continue }
-                var blob:  [(Int, Int)] = []
-                var queue: [(Int, Int)] = [(bx, by)]
-                while !queue.isEmpty {
-                    let (cx, cy) = queue.removeFirst()
-                    let k = "\(cx)_\(cy)"
-                    guard !visited.contains(k) else { continue }
-                    visited.insert(k)
-                    if let pixels = buckets[cx]?[cy] { blob.append(contentsOf: pixels) }
-                    for dx in -1...1 {
-                        for dy in -1...1 {
-                            let nk = "\(cx+dx)_\(cy+dy)"
-                            if !visited.contains(nk), buckets[cx+dx]?[cy+dy] != nil {
-                                queue.append((cx+dx, cy+dy))
-                            }
-                        }
-                    }
-                }
-                if blob.count >= minBlobPixels { blobs.append(blob) }
-            }
-        }
-
-        // Step 3: Compute normalized centers and classify by anchor proximity
-        let fW = CGFloat(imgW); let fH = CGFloat(imgH)
-
-        // Board anchor = center of image horizontally, upper half vertically
-        let boardAnchor = CGPoint(x: 0.5, y: 0.45)
-
-        return blobs.compactMap { blob -> CardBlob? in
-            let sumX = blob.reduce(0) { $0 + $1.0 }
-            let sumY = blob.reduce(0) { $0 + $1.1 }
-            let cx = CGFloat(sumX) / CGFloat(blob.count) / fW
-            let cy = CGFloat(sumY) / CGFloat(blob.count) / fH
-
-            let distHero  = hypot(cx - heroAnchor.x, cy - heroAnchor.y)
-            let distBoard = hypot(cx - boardAnchor.x, cy - boardAnchor.y)
-
-            if distHero <= heroSearchRadius {
-                return CardBlob(centerX: cx, centerY: cy, isHero: true)
-            } else if distBoard <= boardSearchRadius && cy < heroAnchor.y - 0.05 {
-                // Board cards must be above the hero seat
-                return CardBlob(centerX: cx, centerY: cy, isHero: false)
-            }
-            return nil
-        }
-    }
-
-    // ── Card crop ───────────────────────────────────────────────────────────
-
-    /// Crops a region around a blob center for per-card OCR.
-    static func cropCard(cgImage: CGImage, blob: CardBlob,
-                         cardW: CGFloat = 0.10, cardH: CGFloat = 0.12) -> CGImage? {
-        let imgW = CGFloat(cgImage.width)
-        let imgH = CGFloat(cgImage.height)
-        let x = max(0, (blob.centerX - cardW / 2) * imgW)
-        let y = max(0, (blob.centerY - cardH / 2) * imgH)
-        let w = min(cardW * imgW, imgW - x)
-        let h = min(cardH * imgH, imgH - y)
-        guard w > 10, h > 10 else { return nil }
-        return cgImage.cropping(to: CGRect(x: x, y: y, width: w, height: h))
-    }
-}
-
 // MARK: - Table OCR Result
 
 struct TableOCRResult {
@@ -337,8 +189,9 @@ struct TableOCRResult {
     var detectedButtons: [String]
     var heroFound:       Bool
     var heroSeat:        String
+    var heroBox:         CGRect?
     var isHeroFolded:    Bool
-    var cardSource:      String   // "blob+ocr" | "ocr-only" | "error"
+    var cardSource:      String
 }
 
 // MARK: - Apple Vision Table Reader
@@ -347,7 +200,7 @@ enum AppleVisionTableReader {
 
     struct TextItem {
         let text: String
-        let box:  CGRect
+        let box:  CGRect // Vision normalized boundingBox (origin bottom-left)
     }
 
     static func read(imageData: Data, heroUsername: String) async -> TableOCRResult {
@@ -355,81 +208,173 @@ enum AppleVisionTableReader {
             return emptyResult()
         }
 
-        // Stage 1: Run full-image OCR first to find hero username anchor
-        let items   = await ocrFullImage(cgImage: cgImage)
+        let imgW = CGFloat(cgImage.width)
+        let imgH = CGFloat(cgImage.height)
+
+        // Stage 1: Run full-image OCR to read table text, locate hero seat, buttons, blinds, pot
+        let items = await ocrFullImage(cgImage: cgImage)
         let rawText = items.sorted { $0.box.minY > $1.box.minY }
-                          .map { $0.text }.joined(separator: "\n")
+                           .map { $0.text }.joined(separator: "\n")
 
-        // Stage 2: Locate hero anchor from username bounding box
-        var heroAnchor = CGPoint(x: 0.5, y: 0.75)  // fallback: bottom-center
-        let target = heroUsername.lowercased().filter { $0.isLetter || $0.isNumber }
-        if !target.isEmpty {
-            for item in items {
-                let clean = item.text.lowercased().filter { $0.isLetter || $0.isNumber }
-                if clean.contains(target) || (target.count >= 4 && target.contains(clean) && clean.count >= 4) {
-                    // VNRecognize boundingBox origin is bottom-left, y flipped
-                    heroAnchor = CGPoint(x: item.box.midX, y: 1.0 - item.box.midY)
-                    break
-                }
-            }
-        }
-
-        // Stage 3: Detect colored card-back blobs anchored to hero username position
-        let blobs = PurpleCardDetector.detect(cgImage: cgImage, heroAnchor: heroAnchor)
-
-        let heroBlobs  = blobs.filter {  $0.isHero }.sorted { $0.centerX < $1.centerX }
-        let boardBlobs = blobs.filter { !$0.isHero }.sorted { $0.centerX < $1.centerX }
-
-        // Stage 2: OCR each detected card crop
-        var heroCards:  [String] = []
-        var boardCards: [String] = []
-
-        for blob in heroBlobs.prefix(4) {   // max 4 hole cards (PLO)
-            if let crop = PurpleCardDetector.cropCard(cgImage: cgImage, blob: blob) {
-                let card = await ocrSingleCard(cgImage: crop)
-                if !card.isEmpty { heroCards.append(card) }
-            }
-        }
-
-        for blob in boardBlobs.prefix(5) {   // max 5 community cards
-            if let crop = PurpleCardDetector.cropCard(cgImage: cgImage, blob: blob) {
-                let card = await ocrSingleCard(cgImage: crop)
-                if !card.isEmpty { boardCards.append(card) }
-            }
-        }
-
-        let anchorStr = String(format: "%.2f,%.2f", heroAnchor.x, heroAnchor.y)
-        let cardSource = blobs.isEmpty ? "ocr-only" : "blob+ocr(\(blobs.count)blobs,anchor=\(anchorStr))"
-
-        // Stage 4: Parse metadata
+        // Parse general table metadata from text
         var result = parseMetadata(items: items, rawText: rawText, heroUsername: heroUsername)
+
+        // Stage 2: Hero Cards Crop & Read
+        // If hero username was located on the table, hero's cards sit DIRECTLY ABOVE the username!
+        var heroCards: [String] = []
+        if result.heroFound, let heroBox = result.heroBox {
+            // Convert Vision coordinates (origin at bottom-left) to top-down CGImage coordinates
+            let topDownX = heroBox.origin.x
+            let topDownY = 1.0 - (heroBox.origin.y + heroBox.size.height)
+            let boxW = heroBox.size.width
+
+            // Cards are centered horizontally with username, positioned directly above it
+            let cardCropW: CGFloat = max(0.13, boxW * 1.6)
+            let cardCropH: CGFloat = 0.14
+            let cardCenterX: CGFloat = topDownX + (boxW / 2.0)
+            let cardCenterY: CGFloat = topDownY - (cardCropH * 0.45)
+
+            let cropRect = CGRect(
+                x: max(0, (cardCenterX - cardCropW / 2.0) * imgW),
+                y: max(0, (cardCenterY - cardCropH / 2.0) * imgH),
+                width: min(cardCropW * imgW, imgW),
+                height: min(cardCropH * imgH, imgH)
+            )
+
+            if let heroCardsCrop = cgImage.cropping(to: cropRect) {
+                let maxHole = result.gameType.contains("PLO") ? 4 : 2
+                heroCards = await extractCards(from: heroCardsCrop, maxCards: maxHole, isHero: true)
+            }
+        }
+
+        // Stage 3: Community Board Cards Crop & Read
+        // Board cards are in the middle of the table felt (x: 0.18..0.60, y: 0.28..0.58)
+        var boardCards: [String] = []
+        let boardCropRect = CGRect(
+            x: max(0, 0.18 * imgW),
+            y: max(0, 0.28 * imgH),
+            width: min(0.44 * imgW, imgW),
+            height: min(0.30 * imgH, imgH)
+        )
+        if let boardCrop = cgImage.cropping(to: boardCropRect) {
+            boardCards = await extractCards(from: boardCrop, maxCards: 5, isHero: false)
+        }
+
         result.heroCards  = heroCards
         result.boardCards = boardCards
-        result.cardSource = cardSource
+        result.cardSource = heroCards.isEmpty
+            ? "seat-crop(searching)"
+            : "seat-crop(\(heroCards.joined(separator: " ")))"
 
-        // Blob detection of hero cards is ground truth — override fold detection
-        if !heroCards.isEmpty { result.isHeroFolded = false }
+        if !heroCards.isEmpty {
+            result.isHeroFolded = false
+        } else if result.heroFound && result.detectedButtons.isEmpty {
+            // Hero found at seat but has no cards and no action buttons -> folded/waiting
+            result.isHeroFolded = true
+        }
 
         return result
     }
 
-    // MARK: - Per-card OCR
+    // MARK: - Card Extraction from Region Crop
 
-    /// OCR a small card crop. Returns "Ah", "Kd", "10s", rank-only, or "" if unreadable.
-    private static func ocrSingleCard(cgImage: CGImage) async -> String {
+    private static func extractCards(from cgImage: CGImage, maxCards: Int, isHero: Bool) async -> [String] {
         return await withCheckedContinuation { cont in
             let req = VNRecognizeTextRequest { r, err in
                 guard err == nil,
                       let obs = r.results as? [VNRecognizedTextObservation]
-                else { cont.resume(returning: ""); return }
+                else { cont.resume(returning: []); return }
 
-                var texts: [String] = []
-                for ob in obs {
-                    if let t = ob.topCandidates(1).first { texts.append(t.string) }
+                // Sort text observations horizontally left-to-right
+                let sortedObs = obs.sorted { $0.boundingBox.minX < $1.boundingBox.minX }
+
+                var cards: [String] = []
+                let suitMap: [Character: Character] = [
+                    "♠": "s", "♤": "s",
+                    "♥": "h", "♡": "h",
+                    "♦": "d", "♢": "d",
+                    "♣": "c", "♧": "c"
+                ]
+
+                let rankSuitPattern = "\\b(10|[2-9TJQKA])[shdc]\\b"
+                let rankOnlyPattern = "\\b(10|[2-9TJQKA])\\b"
+                let reRankSuit = try? NSRegularExpression(pattern: rankSuitPattern, options: [.caseInsensitive])
+                let reRankOnly = try? NSRegularExpression(pattern: rankOnlyPattern, options: [.caseInsensitive])
+
+                let cropW = CGFloat(cgImage.width)
+                let cropH = CGFloat(cgImage.height)
+
+                for ob in sortedObs {
+                    guard let top = ob.topCandidates(1).first else { continue }
+                    let rawText = top.string.trimmingCharacters(in: .whitespaces)
+                    guard !rawText.isEmpty else { continue }
+
+                    // Skip money, pot, blinds, or UI chrome labels
+                    if rawText.contains("$") || rawText.lowercased().contains("pot") || rawText.lowercased().contains("total") {
+                        continue
+                    }
+
+                    // Normalize unicode suit glyphs
+                    var normalized = ""
+                    for ch in rawText {
+                        if let s = suitMap[ch] { normalized.append(s) }
+                        else { normalized.append(ch) }
+                    }
+
+                    // 1. Try matching Rank + Suit (e.g. "Ad", "3d", "Kh", "8s", "2s")
+                    if let re = reRankSuit {
+                        let ns = normalized as NSString
+                        let matches = re.matches(in: normalized, range: NSRange(location: 0, length: ns.length))
+                        for m in matches {
+                            var token = ns.substring(with: m.range)
+                            if token.count >= 2 {
+                                let rank = String(token.prefix(token.count - 1)).uppercased()
+                                let suit = String(token.suffix(1)).lowercased()
+                                token = rank + suit
+                            }
+                            if !cards.contains(token) || isHero {
+                                cards.append(token)
+                            }
+                        }
+                    }
+
+                    // 2. If no rank+suit match, try Rank only and detect suit from pixel color
+                    if cards.count < maxCards, let re = reRankOnly {
+                        let ns = normalized as NSString
+                        let matches = re.matches(in: normalized, range: NSRange(location: 0, length: ns.length))
+                        for m in matches {
+                            let rank = ns.substring(with: m.range).uppercased()
+                            if cards.contains(where: { $0.hasPrefix(rank) }) { continue }
+
+                            // Sample pixels around this text observation to detect card suit color
+                            let obBox = ob.boundingBox
+                            let pixelRect = CGRect(
+                                x: obBox.origin.x * cropW,
+                                y: (1.0 - obBox.origin.y - obBox.height) * cropH,
+                                width: obBox.width * cropW,
+                                height: obBox.height * cropH
+                            ).insetBy(dx: -20, dy: -20)
+
+                            var suit = detectSuitFromColor(cgImage: cgImage, in: pixelRect)
+                            if suit.isEmpty && isHero {
+                                // Fallback: sample left half vs right half of hero cards crop
+                                let halfRect = obBox.origin.x < 0.5
+                                    ? CGRect(x: 0, y: 0, width: cropW / 2, height: cropH)
+                                    : CGRect(x: cropW / 2, y: 0, width: cropW / 2, height: cropH)
+                                suit = detectSuitFromColor(cgImage: cgImage, in: halfRect)
+                            }
+
+                            let cardToken = rank + (suit.isEmpty ? "" : suit)
+                            cards.append(cardToken)
+                        }
+                    }
+
+                    if cards.count >= maxCards { break }
                 }
-                let combined = texts.joined(separator: " ")
-                cont.resume(returning: parseCardToken(from: combined))
+
+                cont.resume(returning: Array(cards.prefix(maxCards)))
             }
+
             req.recognitionLevel       = .accurate
             req.usesLanguageCorrection = false
             req.recognitionLanguages   = ["en-US"]
@@ -439,49 +384,58 @@ enum AppleVisionTableReader {
         }
     }
 
-    /// Parse a single card notation from OCR text of a card crop.
-    /// Handles: "A♠", "Ah", "10d", "K", "9s", rank-only fallback.
-    private static func parseCardToken(from text: String) -> String {
-        let t = text.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty else { return "" }
+    /// Detects card suit from pixel colors in Stake 4-color and 2-color decks:
+    /// - Blue  -> "d" (Diamonds in 4-color deck)
+    /// - Red   -> "h" (Hearts)
+    /// - Green -> "c" (Clubs in 4-color deck)
+    /// - Dark  -> "s" (Spades)
+    private static func detectSuitFromColor(cgImage: CGImage, in rect: CGRect) -> String {
+        guard
+            let dataRef = cgImage.dataProvider?.data,
+            let ptr     = CFDataGetBytePtr(dataRef)
+        else { return "" }
 
-        // Normalize unicode suit glyphs to letter suits
-        let suitMap: [Character: Character] = [
-            "♠": "s", "♤": "s",
-            "♥": "h", "♡": "h",
-            "♦": "d", "♢": "d",
-            "♣": "c", "♧": "c"
-        ]
-        var normalized = ""
-        for ch in t {
-            if let s = suitMap[ch] { normalized.append(s) }
-            else { normalized.append(ch) }
-        }
+        let imgW = cgImage.width
+        let imgH = cgImage.height
+        let bpp  = cgImage.bitsPerPixel / 8
+        let bpr  = cgImage.bytesPerRow
 
-        // Primary: rank + suit
-        let rankSuitPattern = "\\b(10|[2-9TJQKA])[shdc]\\b"
-        if let re = try? NSRegularExpression(pattern: rankSuitPattern, options: [.caseInsensitive]) {
-            let ns = normalized as NSString
-            if let m = re.firstMatch(in: normalized, range: NSRange(location: 0, length: ns.length)) {
-                var token = ns.substring(with: m.range)
-                // Capitalize rank, lowercase suit
-                if token.count >= 2 {
-                    let rank = String(token.prefix(token.count - 1)).uppercased()
-                    let suit = String(token.suffix(1)).lowercased()
-                    token = rank + suit
+        let minX = max(0, Int(rect.minX))
+        let maxX = min(imgW, Int(rect.maxX))
+        let minY = max(0, Int(rect.minY))
+        let maxY = min(imgH, Int(rect.maxY))
+
+        guard maxX > minX, maxY > minY else { return "" }
+
+        var blue = 0
+        var red = 0
+        var green = 0
+        var dark = 0
+
+        let step = 2
+        for y in stride(from: minY, to: maxY, by: step) {
+            for x in stride(from: minX, to: maxX, by: step) {
+                let off = y * bpr + x * bpp
+                let r = Int(ptr[off])
+                let g = Int(ptr[off + 1])
+                let b = Int(ptr[off + 2])
+
+                if b > 120 && b > r + 30 && b > g + 20 {
+                    blue += 1
+                } else if r > 140 && r > g + 40 && r > b + 40 {
+                    red += 1
+                } else if g > 120 && g > r + 30 && g > b + 30 {
+                    green += 1
+                } else if r < 50 && g < 50 && b < 50 {
+                    dark += 1
                 }
-                return token
             }
         }
 
-        // Fallback: rank only (suit not visible / covered by card back color)
-        let rankOnlyPattern = "\\b(10|[2-9TJQKA])\\b"
-        if let re = try? NSRegularExpression(pattern: rankOnlyPattern, options: [.caseInsensitive]) {
-            let ns = normalized as NSString
-            if let m = re.firstMatch(in: normalized, range: NSRange(location: 0, length: ns.length)) {
-                return ns.substring(with: m.range).uppercased()
-            }
-        }
+        if blue > red && blue > green && blue > 80 { return "d" }
+        if red > blue && red > green && red > 80 { return "h" }
+        if green > blue && green > red && green > 80 { return "c" }
+        if dark > 80 { return "s" }
         return ""
     }
 
@@ -551,7 +505,7 @@ enum AppleVisionTableReader {
         let heroX       = heroBox?.midX ?? 0.5
         let heroY       = heroBox?.midY ?? 0.2
         let heroSeatStr = heroFound
-            ? "\(Int(heroX * 100))%,\(Int(heroY * 100))%"
+            ? "\(Int(heroX * 100))%,\(Int((1.0 - heroY) * 100))%"
             : "not detected"
 
         // Action buttons
@@ -585,7 +539,7 @@ enum AppleVisionTableReader {
             if trimmed.lowercased().hasPrefix("pot") {
                 let moneys = matches(moneyPattern, in: trimmed)
                 if let p = moneys.first { potSize = p }
-            } else if potSize.isEmpty && item.box.midY >= 0.45 && item.box.midY <= 0.80 {
+            } else if potSize.isEmpty && item.box.midY >= 0.40 && item.box.midY <= 0.75 {
                 let moneys = matches(moneyPattern, in: trimmed)
                 if moneys.count == 1 && !trimmed.lowercased().contains("buy") {
                     potSize = moneys[0]
@@ -604,7 +558,7 @@ enum AppleVisionTableReader {
                 : hypot(item.box.midX - 0.5,   item.box.midY - 0.2)
 
             if !moneys.isEmpty && trimmed != potSize {
-                if distToHero <= 0.22 && heroStack.isEmpty {
+                if distToHero <= 0.20 && heroStack.isEmpty {
                     heroStack = moneys.first ?? ""
                 } else {
                     villainLines.append(trimmed)
@@ -612,14 +566,14 @@ enum AppleVisionTableReader {
             }
         }
 
-        // Fold detection: button-based only (blob presence overrides this later)
+        // Fold detection: button-based only (seat-crop presence overrides this later)
         let isHeroFolded = lowerRaw.contains("folded") ||
                            (lowerRaw.contains("fold") && !hasPlayButtons)
 
         return TableOCRResult(
             rawText:         rawText,
-            heroCards:       [],       // filled in by caller after blob+OCR pass
-            boardCards:      [],       // filled in by caller after blob+OCR pass
+            heroCards:       [],       // filled in by caller after seat crop
+            boardCards:      [],       // filled in by caller after board crop
             potSize:         potSize,
             heroStack:       heroStack,
             smallBlind:      smallBlind,
@@ -630,6 +584,7 @@ enum AppleVisionTableReader {
             detectedButtons: detectedButtons,
             heroFound:       heroFound,
             heroSeat:        heroSeatStr,
+            heroBox:         heroBox,
             isHeroFolded:    isHeroFolded,
             cardSource:      "pending"
         )
@@ -648,6 +603,7 @@ enum AppleVisionTableReader {
                        heroStack: "", smallBlind: "", bigBlind: "",
                        gameType: "", tableMode: "", villainInfo: "",
                        detectedButtons: [], heroFound: false, heroSeat: "",
+                       heroBox: nil,
                        isHeroFolded: false, cardSource: "error")
     }
 }
@@ -686,7 +642,8 @@ enum LMStudioClient {
         let systemPrompt = """
 You are a live poker HUD engine for Stake.com online poker.
 You receive a table state JSON extracted from a Stake.com screenshot.
-Cards were detected via pixel color blob detection + per-card OCR crops.
+Hero cards are cropped directly above hero's seat username label.
+Board cards are cropped from the middle of the table.
 Coaching style: \(style).
 Hero username on Stake.com: "\(heroUsername)".
 
@@ -696,7 +653,7 @@ Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
 CRITICAL RULES:
 1. "\(heroUsername)" is hero's USERNAME, NOT hero's hand! Never report "J4" or "J4 clubs" as the hand.
 2. If "is_hero_folded" is true or "hero_cards" is empty, set "hand" to "", "hero_has_cards" to false, "action_on_hero" to false, "action" to "WAITING", recommendation to "Folded — observing table".
-3. If "hero_cards" has entries (e.g. ["Ah","Kd"]), output them space-separated in "hand" (e.g. "Ah Kd").
+3. If "hero_cards" has entries (e.g. ["Ad","3d"]), output them space-separated in "hand" (e.g. "Ad 3d").
 4. If "has_action_buttons" is true, action_on_hero is TRUE. Give an actionable recommendation. Do NOT return WAITING when buttons are visible.
 5. Keep recommendation under 20 words. hint under 12 words.
 6. "action" must be a SINGLE value: FOLD, CALL, CHECK, RAISE, BET, or WAITING — never pipe-separated.
@@ -817,13 +774,13 @@ CRITICAL RULES:
            (cleanH == "j4" && ocrResult.heroCards.isEmpty) {
             hand = ""
         }
-        // Blob-detected cards are ground truth — use them if LLM left hand blank
-        if hand.isEmpty && !ocrResult.heroCards.isEmpty && !ocrResult.isHeroFolded {
+        // Ground truth from OCR always takes precedence over LLM guessing
+        if !ocrResult.heroCards.isEmpty && !ocrResult.isHeroFolded {
             hand = ocrResult.heroCards.joined(separator: " ")
         }
 
         var board = s("board")
-        if board.isEmpty && !ocrResult.boardCards.isEmpty {
+        if !ocrResult.boardCards.isEmpty {
             board = ocrResult.boardCards.joined(separator: " ")
         }
 
