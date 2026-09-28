@@ -15,8 +15,9 @@ echo ""
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RES"
 
-echo "→ Compiling Swift (StakeLabHUD + StakeNativeWatcher)..."
+echo "→ Compiling Swift (StakeCommon + StakeLabHUD + StakeNativeWatcher)..."
 swiftc \
+    StakeCommon.swift \
     StakeLabHUD.swift \
     StakeNativeWatcher.swift \
     -o "$MACOS/StakeLabHUD" \

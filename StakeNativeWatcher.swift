@@ -67,6 +67,7 @@ final class NativeWatcherEngine {
     private let settings: HUDSettings
     private var task:     Task<Void, Never>?
     private(set) var isRunning = false
+    private(set) var isPaused  = false
 
     init(store: AdviceStore, settings: HUDSettings) {
         self.store    = store
@@ -87,10 +88,30 @@ final class NativeWatcherEngine {
         isRunning = false
     }
 
+    func pause() {
+        guard !isPaused else { return }
+        isPaused = true
+        Task { @MainActor in
+            self.store.setWatcherStatus("❚❚ PAUSED (Stream scene: away/BRB)")
+        }
+    }
+
+    func resume() {
+        guard isPaused else { return }
+        isPaused = false
+        Task { @MainActor in
+            self.store.setWatcherStatus("▶ RESUMED (Stream scene: live)")
+        }
+    }
+
     private func loop() async {
         var lastHash   = Data()
         var cycleCount = 0
         while !Task.isCancelled {
+            if isPaused {
+                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s check while paused
+                continue
+            }
             await runCycle(lastHash: &lastHash)
             cycleCount += 1
             if cycleCount % 8 == 0 {
