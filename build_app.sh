@@ -4,15 +4,22 @@
 set -e
 
 APP="/Applications/StakeLabHUD.app"
+ALT_APP="$HOME/Applications/StakeLabHUD.app"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_BUILD_APP="$SCRIPT_DIR/build/StakeLabHUD.app"
+REPO_ROOT_APP="$SCRIPT_DIR/StakeLabHUD.app"
+DOWNLOADS_APP="$HOME/Downloads/StakeLabHUD.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
-ENTITLEMENTS_FILE="/tmp/stakelab_entitlements.plist"
+BUILD_ID="stakelab-local-qwen-stage-structure-advice-layout"
 
 echo ""
-echo "=== Building Stake Lab HUD (Native Swift) ==="
+echo "=== Building Stake Lab HUD (Native Swift / Local Qwen) ==="
+echo "Build ID: $BUILD_ID"
 echo ""
 
-rm -rf "$APP"
+pkill -9 StakeLabHUD 2>/dev/null || true
+rm -rf "$APP" "$ALT_APP" "$REPO_BUILD_APP" "$REPO_ROOT_APP" "$DOWNLOADS_APP"
 mkdir -p "$MACOS" "$RES"
 
 echo "→ Compiling Swift (StakeCommon + StakeLabHUD + StakeNativeWatcher)..."
@@ -68,22 +75,8 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-echo "→ Writing entitlements..."
-cat > "$ENTITLEMENTS_FILE" << 'ENTITLEMENTS'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.network.client</key>
-    <true/>
-</dict>
-</plist>
-ENTITLEMENTS
-
-echo "→ Ad-hoc code signing..."
-codesign --force --deep --sign - \
-    --entitlements "$ENTITLEMENTS_FILE" \
-    "$APP"
+echo "→ Ad-hoc code signing cleanly..."
+codesign --force --deep --sign - "$APP"
 
 echo "→ Clearing quarantine..."
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
@@ -91,8 +84,6 @@ xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 echo "→ Registering with LaunchServices..."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$APP" 2>/dev/null || true
-
-rm -f "$ENTITLEMENTS_FILE"
 
 echo ""
 echo "✅ StakeLabHUD.app built at $APP"

@@ -28,6 +28,17 @@ import Vision
 extension AdviceStore {
     @MainActor
     func setAdvice(_ advice: PokerAdvice) {
+        // Local vision can miss hero cards for one frame while action moves around.
+        // Do not wipe a live hand with a transient WAITING/no-card result.
+        if let existing = current,
+           existing.heroHasCards,
+           !existing.hand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !advice.heroHasCards,
+           advice.action == "WAITING" {
+            setWatcherStatus("Holding live hand — ignored transient no-card frame")
+            latencyText = "live"
+            return
+        }
         lastId      = advice.id
         current     = advice
         isIdle      = false
@@ -169,6 +180,8 @@ final class NativeWatcherEngine {
                 ocrResult:    ocrResult,
                 mode:         settings.gameMode.rawValue,
                 style:        settings.coachingStyle.rawValue,
+                structure:    settings.tournamentStructure.rawValue,
+                stage:        settings.tournamentStage.rawValue,
                 heroUsername: settings.heroUsername
             )
             await MainActor.run {
@@ -647,6 +660,8 @@ enum LMStudioClient {
         ocrResult:    TableOCRResult,
         mode:         String,
         style:        String,
+        structure:    String,
+        stage:        String,
         heroUsername: String
     ) async throws -> PokerAdvice {
 
@@ -654,7 +669,7 @@ enum LMStudioClient {
             throw APIError.unreachable("bad URL")
         }
 
-        let tableJSON = buildTableJSON(ocrResult: ocrResult, mode: mode, heroUsername: heroUsername)
+        let tableJSON = buildTableJSON(ocrResult: ocrResult, mode: mode, structure: structure, stage: stage, heroUsername: heroUsername)
 
         let systemPrompt = """
 You are a live poker HUD engine for Stake.com online poker.
@@ -662,6 +677,7 @@ You receive a table state JSON extracted from a Stake.com screenshot.
 Hero cards are cropped directly above hero's seat username label.
 Board cards are cropped from the middle of the table.
 Coaching style: \(style).
+Tournament structure: \(structure). Tournament stage: \(stage).
 Hero username on Stake.com: "\(heroUsername)".
 
 Return ONLY a valid JSON object -- no markdown, no explanation, no prose:
@@ -672,8 +688,9 @@ CRITICAL RULES:
 2. If "is_hero_folded" is true or "hero_cards" is empty, set "hand" to "", "hero_has_cards" to false, "action_on_hero" to false, "action" to "WAITING", recommendation to "Folded — observing table".
 3. If "hero_cards" has entries (e.g. ["Ad","3d"]), output them space-separated in "hand" (e.g. "Ad 3d").
 4. If "has_action_buttons" is true, action_on_hero is TRUE. Give an actionable recommendation. Do NOT return WAITING when buttons are visible.
-5. Keep recommendation under 20 words. hint under 12 words.
+5. Keep recommendation under 28 words. hint under 18 words and include the main reason (pot odds, stack depth, draw equity, villain tendency, or ICM).
 6. "action" must be a SINGLE value: FOLD, CALL, CHECK, RAISE, BET, or WAITING — never pipe-separated.
+7. Structure/stage guidance: TURBO/HYPER increases steal/rejam urgency and lowers tolerance for speculative flats; BUBBLE/FINAL_TABLE increases ICM survival, especially as a medium stack; EARLY/MIDDLE prioritizes chip EV and accumulation over pure survival.
 """
 
         let body: [String: Any] = [
@@ -709,6 +726,7 @@ CRITICAL RULES:
     }
 
     private static func buildTableJSON(ocrResult: TableOCRResult, mode: String,
+                                        structure: String, stage: String,
                                         heroUsername: String) -> String {
         var raw = ocrResult.rawText
         if raw.count > 1200 { raw = String(raw.prefix(1200)) + "..." }
@@ -719,6 +737,8 @@ CRITICAL RULES:
             "is_hero_folded":          ocrResult.isHeroFolded,
             "card_detection_source":   ocrResult.cardSource,
             "game_mode":               mode,
+            "tournament_structure":    structure,
+            "tournament_stage":        stage,
             "game_type":               ocrResult.gameType.isEmpty  ? "NLH"  : ocrResult.gameType,
             "table_mode":              ocrResult.tableMode.isEmpty ? "CASH" : ocrResult.tableMode,
             "hero_cards":              ocrResult.heroCards,
@@ -895,6 +915,11 @@ enum StakeTableDetector {
 
 enum ScreenCapture {
     static func capture(windowID: CGWindowID) -> Data? {
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+            return nil
+        }
+
         let tmpPath = NSTemporaryDirectory() +
             "stakelab_cap_\(windowID)_\(Int.random(in: 1000...9999)).png"
         defer { try? FileManager.default.removeItem(atPath: tmpPath) }

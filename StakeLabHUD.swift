@@ -86,6 +86,16 @@ struct HUDToolbar: View {
                 .background(settings.streamerMode ? Color.purple.opacity(0.2) : C.secondary.opacity(0.18))
                 .clipShape(Capsule())
 
+            if settings.gameMode == .tourney {
+                Text("\(settings.tournamentStructure.icon) \(settings.tournamentStructure.shortLabel) • \(settings.tournamentStage.icon) \(settings.tournamentStage.shortLabel)")
+                    .font(fzW(9, .bold, .monospaced))
+                    .foregroundColor(C.tourneyBadge)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(C.tourneyBadge.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+
             Spacer()
 
             // Settings Menu
@@ -97,6 +107,26 @@ struct HUDToolbar: View {
                         settings.save()
                     }) {
                         Text(settings.coachingStyle == style ? "✓ \(style.icon) \(style.label)" : "\(style.icon) \(style.label)")
+                    }
+                }
+                Divider()
+                Text("Tournament Structure:")
+                ForEach(TournamentStructure.allCases, id: \.self) { structure in
+                    Button(action: {
+                        settings.tournamentStructure = structure
+                        settings.save()
+                    }) {
+                        Text(settings.tournamentStructure == structure ? "✓ \(structure.icon) \(structure.label)" : "\(structure.icon) \(structure.label)")
+                    }
+                }
+                Divider()
+                Text("Tournament Stage:")
+                ForEach(TournamentStage.allCases, id: \.self) { stage in
+                    Button(action: {
+                        settings.tournamentStage = stage
+                        settings.save()
+                    }) {
+                        Text(settings.tournamentStage == stage ? "✓ \(stage.icon) \(stage.label)" : "\(stage.icon) \(stage.label)")
                     }
                 }
                 Divider()
@@ -330,13 +360,35 @@ struct StatusHeader: View {
 struct RecommendationBadge: View {
     let action: String; let recommendation: String; let confidence: Int
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("ADVICE")
+                    .font(fzW(13, .black, .monospaced))
+                    .foregroundColor(C.gold)
+                if action != "WAITING" && !action.isEmpty {
+                    Text(action)
+                        .font(fzW(13, .black, .monospaced))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(action.actionColor)
+                        .clipShape(Capsule())
+                }
+                Spacer()
+                if confidence > 0 { ConfidencePill(value: confidence) }
+            }
+
             Text(recommendation.isEmpty ? action : recommendation)
-                .font(fzW(36, .black, .rounded))
-                .foregroundColor(action.actionColor)
-                .lineLimit(1).minimumScaleFactor(0.5)
-            ConfidencePill(value: confidence)
+                .font(fzW(24, .black, .rounded))
+                .foregroundColor(action == "WAITING" ? C.primary : action.actionColor)
+                .lineLimit(4)
+                .minimumScaleFactor(0.72)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(C.divider.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -397,8 +449,8 @@ struct HintSection: View {
         if !hint.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("STRATEGY & REAL-TIME TACTICS")
-                        .font(fzW(14, .bold, .monospaced))
+                    Text("WHY / TIPS")
+                        .font(fzW(12, .bold, .monospaced))
                         .foregroundColor(C.gold)
                     Spacer()
                 }
@@ -414,7 +466,7 @@ struct HintSection: View {
                             .font(fzW(isLeakWarning || isConceptTip || isDeltaStat || isOpponentBullet ? 16 : 20, .black))
                             .foregroundColor(isLeakWarning ? C.fold : (isOpponentBullet ? C.cyan : (isConceptTip ? C.secondary : (isDeltaStat ? C.call : C.gold))))
                         Text(line.replacingOccurrences(of: "⚠️ ", with: "").replacingOccurrences(of: "💡 ", with: "").replacingOccurrences(of: "📈 ", with: "").replacingOccurrences(of: "📉 ", with: "").replacingOccurrences(of: "📊 ", with: "").replacingOccurrences(of: "• ", with: ""))
-                            .font(fzW(isCoachingHeader ? 15 : 17, isCoachingHeader || isLeakWarning ? .bold : .medium))
+                            .font(fzW(isCoachingHeader ? 13 : 14, isCoachingHeader || isLeakWarning ? .bold : .medium))
                             .foregroundColor(isLeakWarning ? Color.yellow : (isOpponentBullet ? C.cyan : (isConceptTip ? C.call : (isCoachingHeader ? C.gold : C.primary))))
                             .lineSpacing(4)
                             .fixedSize(horizontal: false, vertical: true)
@@ -422,8 +474,8 @@ struct HintSection: View {
                     .padding(.vertical, isCoachingHeader ? 2 : 0)
                 }
             }
-            .padding(12)
-            .background(C.divider.opacity(0.18))
+            .padding(10)
+            .background(C.divider.opacity(0.12))
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
@@ -1000,12 +1052,16 @@ struct HUDContentView: View {
                 .padding(.horizontal, 10)
                 .background(C.divider.opacity(0.1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                RecommendationBadge(action: "WAITING",
+                                    recommendation: advice.recommendation.isEmpty ? "Hand active — monitor action ahead of you." : advice.recommendation,
+                                    confidence: advice.confidence)
             } else {
                 // Action is actively ON HERO
                 RecommendationBadge(action: advice.action,
                                     recommendation: advice.recommendation,
                                     confidence: advice.confidence)
-                    .opacity(store.isIdle ? 0.35 : 1.0)
+                    .opacity(store.isIdle ? 0.75 : 1.0)
             }
 
             HandInfoRow(board: advice.board)
@@ -1082,7 +1138,7 @@ struct VillainReadSection: View {
                     ForEach(activeVillains, id: \.username) { p in
                         VillainCard(profile: p)
                     }
-                    ForEach(unknownNames, id: \.self) { name in
+                    ForEach(Array(unknownNames.prefix(3)), id: \.self) { name in
                         HStack(spacing: 8) {
                             Text(name)
                                 .font(fzW(13, .semibold, .monospaced))
@@ -1094,6 +1150,12 @@ struct VillainReadSection: View {
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(C.divider.opacity(0.15))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    if unknownNames.count > 3 {
+                        Text("+\(unknownNames.count - 3) more players — no read yet")
+                            .font(fzW(11, .regular, .monospaced))
+                            .foregroundColor(C.label)
+                            .padding(.horizontal, 10).padding(.vertical, 4)
                     }
                 }
             }

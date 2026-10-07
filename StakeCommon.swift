@@ -58,6 +58,64 @@ enum CoachingStyle: String, CaseIterable {
     }
 }
 
+enum TournamentStructure: String, CaseIterable {
+    case standard = "STANDARD"
+    case turbo    = "TURBO"
+    case hyper    = "HYPER"
+
+    var label: String {
+        switch self {
+        case .standard: return "Standard"
+        case .turbo:    return "Turbo"
+        case .hyper:    return "Hyper"
+        }
+    }
+    var shortLabel: String { rawValue }
+    var icon: String {
+        switch self {
+        case .standard: return "⏱️"
+        case .turbo:    return "⚡"
+        case .hyper:    return "🚀"
+        }
+    }
+}
+
+enum TournamentStage: String, CaseIterable {
+    case early      = "EARLY"
+    case middle     = "MIDDLE"
+    case bubble     = "BUBBLE"
+    case inTheMoney = "ITM"
+    case finalTable = "FINAL_TABLE"
+
+    var label: String {
+        switch self {
+        case .early:      return "Early"
+        case .middle:     return "Middle"
+        case .bubble:     return "Bubble"
+        case .inTheMoney: return "In the Money"
+        case .finalTable: return "Final Table"
+        }
+    }
+    var shortLabel: String {
+        switch self {
+        case .early:      return "EARLY"
+        case .middle:     return "MID"
+        case .bubble:     return "BUBBLE"
+        case .inTheMoney: return "ITM"
+        case .finalTable: return "FT"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .early:      return "🌱"
+        case .middle:     return "⚔️"
+        case .bubble:     return "🫧"
+        case .inTheMoney: return "💵"
+        case .finalTable: return "🏁"
+        }
+    }
+}
+
 // MARK: - Settings (persisted to ~/.stakelab_hud_settings)
 
 enum HUDSizePreset: String, CaseIterable {
@@ -82,6 +140,8 @@ final class HUDSettings: ObservableObject {
 
     @Published var gameMode:      GameMode      = .cash
     @Published var coachingStyle: CoachingStyle = .gto
+    @Published var tournamentStructure: TournamentStructure = .standard
+    @Published var tournamentStage: TournamentStage = .early
     @Published var streamerMode:  Bool          = false
     @Published var fontScale:     CGFloat       = 1.0   // 0.75 / 1.0 / 1.25 / 1.5
     @Published var voiceAlerts:   Bool          = true
@@ -101,6 +161,8 @@ final class HUDSettings: ObservableObject {
         var d: [String: Any] = [
             "gameMode": gameMode.rawValue,
             "coachingStyle": coachingStyle.rawValue,
+            "tournamentStructure": tournamentStructure.rawValue,
+            "tournamentStage": tournamentStage.rawValue,
             "streamerMode": streamerMode,
             "fontScale": fontScale,
             "voiceAlerts": voiceAlerts,
@@ -122,6 +184,10 @@ final class HUDSettings: ObservableObject {
         try? gameMode.rawValue.write(toFile: modeFile, atomically: true, encoding: .utf8)
         let styleFile = NSHomeDirectory() + "/.stakelab_hud_style"
         try? coachingStyle.rawValue.write(toFile: styleFile, atomically: true, encoding: .utf8)
+        let structureFile = NSHomeDirectory() + "/.stakelab_hud_structure"
+        try? tournamentStructure.rawValue.write(toFile: structureFile, atomically: true, encoding: .utf8)
+        let stageFile = NSHomeDirectory() + "/.stakelab_hud_stage"
+        try? tournamentStage.rawValue.write(toFile: stageFile, atomically: true, encoding: .utf8)
         let streamerFile = NSHomeDirectory() + "/.stakelab_hud_streamer"
         try? (streamerMode ? "1" : "0").write(toFile: streamerFile, atomically: true, encoding: .utf8)
     }
@@ -131,6 +197,8 @@ final class HUDSettings: ObservableObject {
               let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         if let m = d["gameMode"] as? String, let mode = GameMode(rawValue: m) { gameMode = mode }
         if let s = d["coachingStyle"] as? String, let style = CoachingStyle(rawValue: s) { coachingStyle = style }
+        if let s = d["tournamentStructure"] as? String, let structure = TournamentStructure(rawValue: s) { tournamentStructure = structure }
+        if let s = d["tournamentStage"] as? String, let stage = TournamentStage(rawValue: s) { tournamentStage = stage }
         if let st = d["streamerMode"] as? Bool { streamerMode = st }
         if let s = d["fontScale"] as? CGFloat { fontScale = s }
         if let v = d["voiceAlerts"] as? Bool { voiceAlerts = v }
