@@ -741,6 +741,98 @@ enum AppleVisionTableReader {
     }
 }
 
+// MARK: - Stake Table Detector
+
+enum StakeTableDetector {
+    static func findStakeWindow() -> (id: CGWindowID, title: String)? {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+
+        var best: (id: CGWindowID, area: CGFloat, title: String)?
+
+        for info in list {
+            guard let owner = info[kCGWindowOwnerName as String] as? String else { continue }
+            let ownerLC = owner.lowercased()
+            guard ownerLC.contains("floorp") || ownerLC == "firefox" else { continue }
+
+            guard
+                let rawID  = info[kCGWindowNumber as String] as? Int,
+                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                let w = bounds["Width"], let h = bounds["Height"],
+                w >= 600, h >= 400
+            else { continue }
+
+            let windowID = CGWindowID(rawID)
+            let area     = w * h
+            let title    = info[kCGWindowName as String] as? String ?? ""
+
+            if best == nil || area > best!.area {
+                best = (id: windowID, area: area, title: title)
+            }
+        }
+        return best.map { (id: $0.id, title: $0.title) }
+    }
+
+    static func findStakeWindowID() -> CGWindowID? { findStakeWindow()?.id }
+
+    static func visibleProcessNames() -> String {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return "unavailable" }
+        var seen = Set<String>()
+        for info in list {
+            if let owner = info[kCGWindowOwnerName as String] as? String { seen.insert(owner) }
+        }
+        return seen.sorted().joined(separator: ", ")
+    }
+
+    static func debugInfo() -> String {
+        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
+                as? [[String: Any]] else { return "CGWindowList unavailable" }
+        var lines: [String] = ["=== Visible Windows ==="]
+        for info in list.prefix(40) {
+            let owner  = info[kCGWindowOwnerName as String] as? String ?? "?"
+            let title  = info[kCGWindowName as String] as? String ?? ""
+            let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+            let w = Int(bounds["Width"] ?? 0); let h = Int(bounds["Height"] ?? 0)
+            lines.append("\(owner) | \(w)x\(h) | \(title.prefix(50))")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - Screen Capture
+
+enum ScreenCapture {
+    static func capture(windowID: CGWindowID) -> Data? {
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+            return nil
+        }
+
+        let tmpPath = NSTemporaryDirectory() +
+            "stakelab_cap_\(windowID)_\(Int.random(in: 1000...9999)).png"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        proc.arguments = ["-l", "\(windowID)", "-x", "-o", "-t", "png", tmpPath]
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+        do { try proc.run(); proc.waitUntilExit() } catch { return nil }
+
+        if proc.terminationStatus != 0 { return nil }
+
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmpPath)),
+              data.count > 500 else { return nil }
+        return data
+    }
+}
+
+
+
 // MARK: - Local provider configuration
 
 enum EnvLoader {
@@ -1019,7 +1111,7 @@ Use action FOLD, CALL, CHECK, RAISE, BET, or WAITING. Use WAITING when hero has 
             villainNames: str("villain_names"), gameType: str("game_type"),
             tableMode: str("table_mode").isEmpty ? "CASH" : str("table_mode"),
             heroHasCards: (d["hero_has_cards"] as? Bool) ?? !str("hand").isEmpty,
-            actionOnHero: (d["action_on_hero"] as? Bool) ?? action != "WAITING"
+            actionOnHero: (d["action_on_hero"] as? Bool) ?? (action != "WAITING")
         )
     }
 }
