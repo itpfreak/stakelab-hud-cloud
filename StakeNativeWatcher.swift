@@ -42,7 +42,6 @@ extension AdviceStore {
         lastId      = advice.id
         current     = advice
         isIdle      = false
-        latencyText = "live"
     }
 
     @MainActor
@@ -77,6 +76,8 @@ final class NativeWatcherEngine {
     private let store:    AdviceStore
     private let settings: HUDSettings
     private var task:     Task<Void, Never>?
+    private var inferenceTask: Task<Void, Never>?
+    private var latestMeaningfulState = ""
     private var cachedHeroBox: CGRect?
     private(set) var isRunning = false
     private(set) var isPaused  = false
@@ -96,7 +97,9 @@ final class NativeWatcherEngine {
 
     func stop() {
         task?.cancel()
+        inferenceTask?.cancel()
         task      = nil
+        inferenceTask = nil
         isRunning = false
     }
 
@@ -117,15 +120,14 @@ final class NativeWatcherEngine {
     }
 
     private func loop() async {
-        var lastHash   = Data()
-        var lastMeaningfulState = ""
+        var lastHash = Data()
         var cycleCount = 0
         while !Task.isCancelled {
             if isPaused {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s check while paused
                 continue
             }
-            await runCycle(lastHash: &lastHash, lastMeaningfulState: &lastMeaningfulState)
+            await runCycle(lastHash: &lastHash)
             cycleCount += 1
             if cycleCount % 8 == 0 {
                 let procs = StakeTableDetector.visibleProcessNames()
@@ -137,7 +139,7 @@ final class NativeWatcherEngine {
         }
     }
 
-    private func runCycle(lastHash: inout Data, lastMeaningfulState: inout String) async {
+    private func runCycle(lastHash: inout Data) async {
         let cycleStarted = Date()
         // 1. Find Stake table window in Floorp
         guard let windowID = StakeTableDetector.findStakeWindowID() else {
@@ -201,12 +203,14 @@ final class NativeWatcherEngine {
             settings.gameMode.rawValue, settings.coachingStyle.rawValue,
             settings.tournamentStructure.rawValue, settings.tournamentStage.rawValue
         ].joined(separator: "|")
-        guard meaningfulState != lastMeaningfulState else { return }
+        guard meaningfulState != latestMeaningfulState else { return }
 
         // Never invoke the model while folded/observing. Clear stale advice once
         // when the hand ends, then wait for a new positively detected hand.
         guard !ocrResult.isHeroFolded && !ocrResult.heroCards.isEmpty else {
-            lastMeaningfulState = meaningfulState
+            latestMeaningfulState = meaningfulState
+            inferenceTask?.cancel()
+            inferenceTask = nil
             await MainActor.run {
                 self.store.clearAdvice()
                 self.store.setWatcherStatus("No active hero hand — model skipped")
@@ -236,45 +240,59 @@ final class NativeWatcherEngine {
             heroHasCards:   true,
             actionOnHero:   !ocrResult.detectedButtons.isEmpty
         )
+        latestMeaningfulState = meaningfulState
+        inferenceTask?.cancel()
         await MainActor.run {
             self.store.setAdvice(provisional)
+            self.store.latencyText = "OCR \(ocrMS)ms / capture \(captureMS)ms"
             self.store.setWatcherStatus("\(summary) -> Asking Qwen 3 (OCR=\(ocrMS)ms, capture=\(captureMS)ms)...")
         }
-        let modelStarted = Date()
 
-        do {
-            let advice = try await LMStudioClient.analyze(
-                ocrResult:    ocrResult,
-                mode:         settings.gameMode.rawValue,
-                style:        settings.coachingStyle.rawValue,
-                structure:    settings.tournamentStructure.rawValue,
-                stage:        settings.tournamentStage.rawValue,
-                heroUsername: settings.heroUsername
-            )
-            let modelMS = Int(Date().timeIntervalSince(modelStarted) * 1000)
-            let totalMS = Int(Date().timeIntervalSince(cycleStarted) * 1000)
-            // A model request may finish after a fold/new hand was detected.
-            // Never let that stale response resurrect advice for the prior hand.
-            guard meaningfulState == lastMeaningfulState else { return }
-            lastMeaningfulState = meaningfulState
-            await MainActor.run {
-                self.store.setAdvice(advice)
-                if advice.action == "WAITING" {
-                    let msg = advice.recommendation.isEmpty ? "Waiting for action / hand" : advice.recommendation
-                    self.store.setWatcherStatus("Waiting (model=\(modelMS)ms total=\(totalMS)ms): \(msg.prefix(60))")
-                } else {
-                    self.store.setWatcherStatus("OK (model=\(modelMS)ms total=\(totalMS)ms): \(advice.action) -- \(advice.recommendation.prefix(60))")
-                    if self.settings.voiceAlerts && !advice.action.isEmpty && advice.actionOnHero {
-                        let sayProc = Process()
-                        sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-                        sayProc.arguments = [advice.action.lowercased()]
-                        try? sayProc.run()
+        // Do not block capture/OCR on the model. A slow request must not leave
+        // the previous hand displayed while the next hand is being dealt.
+        let requestState = meaningfulState
+        let requestOCR = ocrResult
+        let requestMode = settings.gameMode.rawValue
+        let requestStyle = settings.coachingStyle.rawValue
+        let requestStructure = settings.tournamentStructure.rawValue
+        let requestStage = settings.tournamentStage.rawValue
+        let requestUsername = settings.heroUsername
+        let requestStarted = Date()
+        inferenceTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let advice = try await LMStudioClient.analyze(
+                    ocrResult: requestOCR,
+                    mode: requestMode,
+                    style: requestStyle,
+                    structure: requestStructure,
+                    stage: requestStage,
+                    heroUsername: requestUsername
+                )
+                guard !Task.isCancelled, requestState == self.latestMeaningfulState else { return }
+                let modelMS = Int(Date().timeIntervalSince(requestStarted) * 1000)
+                await MainActor.run {
+                    guard requestState == self.latestMeaningfulState else { return }
+                    self.store.setAdvice(advice)
+                    self.store.latencyText = "model \(modelMS)ms / OCR \(ocrMS)ms"
+                    if advice.action == "WAITING" {
+                        let msg = advice.recommendation.isEmpty ? "Waiting for action / hand" : advice.recommendation
+                        self.store.setWatcherStatus("Waiting (model=\(modelMS)ms, OCR=\(ocrMS)ms): \(msg.prefix(60))")
+                    } else {
+                        self.store.setWatcherStatus("OK (model=\(modelMS)ms, OCR=\(ocrMS)ms): \(advice.action) -- \(advice.recommendation.prefix(60))")
+                        if self.settings.voiceAlerts && !advice.action.isEmpty && advice.actionOnHero {
+                            let sayProc = Process()
+                            sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+                            sayProc.arguments = [advice.action.lowercased()]
+                            try? sayProc.run()
+                        }
                     }
                 }
-            }
-        } catch {
-            await MainActor.run {
-                self.store.setWatcherStatus("LLM error: \(error.localizedDescription.prefix(120))")
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.store.setWatcherStatus("LLM error: \(error.localizedDescription.prefix(120))")
+                }
             }
         }
     }
