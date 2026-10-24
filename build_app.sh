@@ -33,7 +33,9 @@ swiftc \
     -framework Foundation \
     -framework CryptoKit \
     -framework Vision \
-    -framework CoreImage
+    -framework CoreImage \
+    -framework ScreenCaptureKit \
+    -framework ImageIO
 
 if [ ! -f "$MACOS/StakeLabHUDCloud" ]; then
     echo "❌ Compile failed — binary missing"

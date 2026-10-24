@@ -22,6 +22,8 @@ import AppKit
 import CryptoKit
 import Foundation
 import Vision
+import ScreenCaptureKit
+import ImageIO
 
 // MARK: - AdviceStore Extension
 
@@ -152,7 +154,7 @@ final class NativeWatcherEngine {
 
         // 2. Capture in-memory PNG
         let captureStarted = Date()
-        guard let imageData = ScreenCapture.capture(windowID: windowID) else {
+        guard let imageData = await ScreenCapture.capture(windowID: windowID) else {
             await MainActor.run {
                 self.store.setWatcherStatus("WARNING: Capture failed -- ensure Screen Recording is granted in System Settings -> Privacy -> Screen Recording")
             }
@@ -808,32 +810,42 @@ enum StakeTableDetector {
 // MARK: - Screen Capture
 
 enum ScreenCapture {
-    static func capture(windowID: CGWindowID) -> Data? {
-        if !CGPreflightScreenCaptureAccess() {
+    // Capture in-process so macOS attributes the Screen Recording grant to
+    // StakeLabHUDCloud, not to the /usr/sbin/screencapture helper process.
+    static func capture(windowID: CGWindowID) async -> Data? {
+        guard #available(macOS 14.0, *) else { return nil }
+        guard CGPreflightScreenCaptureAccess() else {
             CGRequestScreenCaptureAccess()
             return nil
         }
-
-        let tmpPath = NSTemporaryDirectory() +
-            "stakelab_cap_\(windowID)_\(Int.random(in: 1000...9999)).png"
-        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        proc.arguments = ["-l", "\(windowID)", "-x", "-o", "-t", "png", tmpPath]
-        let errPipe = Pipe()
-        proc.standardError = errPipe
-        do { try proc.run(); proc.waitUntilExit() } catch { return nil }
-
-        if proc.terminationStatus != 0 { return nil }
-
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmpPath)),
-              data.count > 500 else { return nil }
-        return data
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true
+            )
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                return nil
+            }
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let scale: CGFloat = 2.0
+            let config = SCStreamConfiguration()
+            config.width = max(1, Int(window.frame.width * scale))
+            config.height = max(1, Int(window.frame.height * scale))
+            config.showsCursor = false
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: config
+            )
+            guard let data = NSMutableData(length: 0),
+                  let destination = CGImageDestinationCreateWithData(
+                    data as CFMutableData, "public.png" as CFString, 1, nil
+                  ) else { return nil }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { return nil }
+            return data as Data
+        } catch {
+            return nil
+        }
     }
 }
-
-
 
 // MARK: - Local provider configuration
 
