@@ -75,8 +75,17 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-echo "→ Ad-hoc code signing cleanly..."
-codesign --force --deep --sign - "$APP"
+# Prefer a stable local signing identity so macOS TCC/Screen Recording grants
+# survive rebuilds. Ad-hoc signatures change identity on every build.
+SIGNING_IDENTITY="${STAKELAB_SIGNING_IDENTITY:-StakeLabDev}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "\"$SIGNING_IDENTITY\""; then
+    echo "→ Signing with stable identity: $SIGNING_IDENTITY"
+    codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP"
+else
+    echo "→ Stable identity '$SIGNING_IDENTITY' not found; using ad-hoc signing"
+    echo "  Screen Recording permission may need to be re-granted after each rebuild."
+    codesign --force --deep --sign - "$APP"
+fi
 if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
     echo "❌ Code-signature verification failed"
     exit 1
