@@ -791,6 +791,54 @@ struct PlayersTabView: View {
 
 // MARK: - Logs / Diagnostics Tab
 
+/// NSTextView gives us explicit control over the scroll position. SwiftUI's
+/// TextEditor does not reliably keep its internal scroll view at the end when
+/// its bound text is replaced during live log refreshes.
+struct AutoScrollingLogView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.drawsBackground = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textColor = NSColor(calibratedWhite: 0.82, alpha: 1.0)
+        textView.string = text
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        scrollToBottom(textView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+        // The log is live-refreshed by replacing the whole tail. Always reveal
+        // the newest lines without requiring a manual scroll.
+        scrollToBottom(textView)
+    }
+
+    private func scrollToBottom(_ textView: NSTextView) {
+        let end = NSRange(location: textView.string.utf16.count, length: 0)
+        textView.scrollRangeToVisible(end)
+    }
+}
+
 struct LogsTabView: View {
     @ObservedObject var store: AdviceStore
     @State private var logText: String = "Reading watcher log..."
@@ -882,18 +930,12 @@ struct LogsTabView: View {
                 .font(fzW(11, .semibold, .monospaced))
                 .foregroundColor(C.label)
 
-            // Log area — newest at bottom, auto-scrolls via TextEditor native scroll.
-            // TextEditor inherently scrolls to show cursor at end when text updates.
-            ZStack(alignment: .bottomLeading) {
-                TextEditor(text: .constant(logText))
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
-                    .foregroundColor(C.secondary)
-                    .scrollContentBackground(.hidden)
-                    .padding(4)
-                    .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 320)
-                    .background(Color.black.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+            // Newest lines are kept visible at the bottom automatically.
+            AutoScrollingLogView(text: logText)
+                .padding(4)
+                .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 320)
+                .background(Color.black.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .onAppear {
             fetchLog()
