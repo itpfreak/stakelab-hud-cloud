@@ -11,7 +11,7 @@ REPO_ROOT_APP="$SCRIPT_DIR/StakeLabHUDCloud.app"
 DOWNLOADS_APP="$HOME/Downloads/StakeLabHUDCloud.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
-BUILD_ID="stakelab-local-qwen-stage-structure-advice-layout"
+BUILD_ID="stakelab-cloud-gemini-direct-6458565"
 
 echo ""
 echo "=== Building Stake Lab HUD (Native Swift / Local Qwen) ==="
@@ -54,7 +54,7 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
     <key>CFBundleName</key>
     <string>StakeLabHUDCloud</string>
     <key>CFBundleDisplayName</key>
-    <string>Stake Lab HUD</string>
+    <string>Stake Lab HUD Cloud</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
@@ -77,6 +77,10 @@ PLIST
 
 echo "→ Ad-hoc code signing cleanly..."
 codesign --force --deep --sign - "$APP"
+if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
+    echo "❌ Code-signature verification failed"
+    exit 1
+fi
 
 echo "→ Clearing quarantine..."
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
