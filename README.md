@@ -40,3 +40,15 @@ Build:
 ```bash
 cd ~/stakelab-hud-cloud && git pull && bash build_app.sh && open /Applications/StakeLabHUDCloud.app
 ```
+
+
+## Nous Portal mode
+
+This app can use the local Hermes subscription proxy instead of a Google API key. On the Mac, authenticate and start it:
+
+```bash
+hermes portal
+hermes proxy start
+```
+
+Then set `NOUS_PROXY_BASE_URL`, `NOUS_PROXY_KEY`, and `NOUS_MODEL` in `~/stakelab-hud-cloud/.env`. The proxy uses your Nous Portal OAuth subscription; `NOUS_PROXY_KEY` is only a non-empty placeholder because the proxy attaches the real credential.

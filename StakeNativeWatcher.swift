@@ -263,7 +263,8 @@ final class NativeWatcherEngine {
             guard let self else { return }
             do {
                 let apiKey = EnvLoader.geminiKey()
-                guard !apiKey.isEmpty else {
+                let nousProxyBase = EnvLoader.value("NOUS_PROXY_BASE_URL")
+                guard !apiKey.isEmpty || !nousProxyBase.isEmpty else {
                     throw StakeGeminiClient.APIError.parse("GEMINI_API_KEY missing — set it in ~/stakelab-hud-cloud/.env")
                 }
                 let advice = try await StakeGeminiClient.analyze(
@@ -740,30 +741,29 @@ enum AppleVisionTableReader {
     }
 }
 
-// MARK: - .env Loader
+// MARK: - Local provider configuration
 
 enum EnvLoader {
-    static func geminiKey() -> String {
-        let home = NSHomeDirectory()
-        let paths = [
-            "\(home)/stakelab-hud-cloud/.env",
-            "\(home)/stakelab-hud/.env",
-            "\(home)/freakslab-poker-hud/.env",
-            "\(home)/.env"
-        ]
+    private static let paths = [
+        NSHomeDirectory() + "/stakelab-hud-cloud/.env",
+        NSHomeDirectory() + "/.env"
+    ]
+
+    static func value(_ name: String) -> String {
         for path in paths {
             guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
             for raw in text.components(separatedBy: "\n") {
                 let line = raw.trimmingCharacters(in: .whitespaces)
-                guard !line.hasPrefix("#"), line.hasPrefix("GEMINI_API_KEY=") else { continue }
-                return line
-                    .dropFirst("GEMINI_API_KEY=".count)
+                guard !line.hasPrefix("#"), line.hasPrefix(name + "=") else { continue }
+                return String(line.dropFirst((name + "=").count))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             }
         }
-        return ProcessInfo.processInfo.environment["GEMINI_API_KEY"] ?? ""
+        return ProcessInfo.processInfo.environment[name] ?? ""
     }
+
+    static func geminiKey() -> String { value("GEMINI_API_KEY") }
 }
 
 
@@ -787,6 +787,14 @@ enum StakeGeminiClient {
         style:     String,
         apiKey:    String
     ) async throws -> PokerAdvice {
+        let proxyBase = EnvLoader.value("NOUS_PROXY_BASE_URL")
+        if !proxyBase.isEmpty {
+            return try await NousProxyClient.analyze(
+                imageData: imageData, mode: mode, style: style,
+                model: EnvLoader.value("NOUS_MODEL").isEmpty ? "google/gemini-3.7-flash" : EnvLoader.value("NOUS_MODEL"),
+                baseURL: proxyBase, apiKey: EnvLoader.value("NOUS_PROXY_KEY").isEmpty ? "sk-unused" : EnvLoader.value("NOUS_PROXY_KEY")
+            )
+        }
         let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(ProcessInfo.processInfo.environment["GEMINI_MODEL"] ?? "gemini-3.6-flash"):generateContent?key=\(apiKey)"
         guard let url = URL(string: endpoint) else {
             throw APIError.parse("Invalid URL")
@@ -930,6 +938,87 @@ enum StakeGeminiClient {
             tableMode:      s("table_mode").isEmpty ? "CASH" : s("table_mode"),
             heroHasCards:   (d["hero_has_cards"] as? Bool) ?? (act != "WAITING"),
             actionOnHero:   (d["action_on_hero"] as? Bool) ?? (act != "WAITING" && !act.isEmpty)
+        )
+    }
+}
+
+
+// MARK: - Nous Portal subscription proxy client
+
+enum NousProxyClient {
+    enum APIError: Swift.Error, LocalizedError {
+        case http(Int, String), parse(String)
+        var errorDescription: String? {
+            switch self {
+            case .http(let c, let b): return "Nous proxy HTTP \(c): \(b.prefix(160))"
+            case .parse(let m): return "Nous proxy parse: \(m)"
+            }
+        }
+    }
+
+    static func analyze(imageData: Data, mode: String, style: String,
+                        model: String, baseURL: String, apiKey: String) async throws -> PokerAdvice {
+        guard let url = URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/chat/completions") else {
+            throw APIError.parse("Invalid proxy URL")
+        }
+        let prompt = """
+You are a fast live poker HUD. Analyze this Stake.com screenshot and return ONLY valid JSON.
+Game mode: \(mode). Coaching style: \(style).
+Return keys: hand, position, board, action, recommendation, confidence, hint, small_blind, big_blind, ante, villain_names, game_type, table_mode, hero_has_cards, action_on_hero.
+Use action FOLD, CALL, CHECK, RAISE, BET, or WAITING. Use WAITING when hero has no cards, folded, or it is not hero's turn. Keep recommendation under 20 words. Do not invent cards.
+"""
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": prompt],
+                ["role": "user", "content": [
+                    ["type": "text", "text": "Read the poker table screenshot."],
+                    ["type": "image_url", "image_url": ["url": "data:image/png;base64,\(imageData.base64EncodedString())"]]
+                ]]
+            ],
+            "temperature": 0.1,
+            "max_tokens": 160
+        ]
+        var req = URLRequest(url: url, timeoutInterval: 45)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw APIError.http(0, "No HTTP response") }
+        guard http.statusCode == 200 else { throw APIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "") }
+        return try parse(data: data)
+    }
+
+    private static func parse(data: Data) throws -> PokerAdvice {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = root["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              var text = message["content"] as? String else {
+            throw APIError.parse("Missing choices.message.content")
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("```json") { text = String(text.dropFirst(7)) }
+        if text.hasPrefix("```") { text = String(text.dropFirst(3)) }
+        if text.hasSuffix("```") { text = String(text.dropLast(3)) }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}"),
+              let json = String(text[start...end]).data(using: .utf8),
+              let d = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+            throw APIError.parse("Invalid JSON response: \(text.prefix(200))")
+        }
+        let str = { (key: String) in d[key] as? String ?? "" }
+        let action = str("action").isEmpty ? "WAITING" : str("action")
+        return PokerAdvice(
+            id: Int(Date().timeIntervalSince1970 * 1000) & Int.max,
+            hand: str("hand"), position: str("position"), board: str("board"), action: action,
+            recommendation: str("recommendation"), confidence: d["confidence"] as? Int ?? 0,
+            hint: str("hint"), timestamp: ISO8601DateFormatter().string(from: Date()),
+            smallBlind: str("small_blind"), bigBlind: str("big_blind"), ante: str("ante"),
+            villainNames: str("villain_names"), gameType: str("game_type"),
+            tableMode: str("table_mode").isEmpty ? "CASH" : str("table_mode"),
+            heroHasCards: (d["hero_has_cards"] as? Bool) ?? !str("hand").isEmpty,
+            actionOnHero: (d["action_on_hero"] as? Bool) ?? action != "WAITING"
         )
     }
 }
