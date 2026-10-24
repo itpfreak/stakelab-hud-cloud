@@ -1,5 +1,5 @@
 // StakeNativeWatcher.swift
-// Native Swift screen capture + Seat-Anchor Card Detection + Apple Vision OCR + Local Qwen 2.5
+// Native Swift screen capture + Seat-Anchor Card Detection + Apple Vision OCR + Local Qwen 3
 // Target: Floorp browser (Firefox-based) running Stake.com poker tables
 //
 // Architecture:
@@ -12,7 +12,7 @@
 //                                     and extracts the 2 hole cards via OCR + 4-color suit check.
 //   Stage 4 — Board Cards Crop:       Takes a crop of the middle felt (community cards)
 //                                     and extracts flop/turn/river cards.
-//   Stage 5 — Strategy Advice:        Structured table JSON -> Qwen 2.5 7B @ localhost:1234
+//   Stage 5 — Strategy Advice:        Structured table JSON -> Qwen 3 VL 8B @ localhost:1234
 //
 // Zero cloud. Zero API key. Zero token cost.
 // Works with any seat position, window size, or deck colors (standard & 4-color).
@@ -232,7 +232,7 @@ final class NativeWatcherEngine {
         )
         await MainActor.run {
             self.store.setAdvice(provisional)
-            self.store.setWatcherStatus("\(summary) -> Asking Qwen 2.5...")
+            self.store.setWatcherStatus("\(summary) -> Asking Qwen 3...")
         }
         let modelStarted = Date()
 
@@ -728,7 +728,13 @@ enum LMStudioClient {
     }
 
     static let endpoint  = "http://localhost:1234/v1/chat/completions"
-    static let modelName = "qwen2.5-7b-instruct"
+    // Match the current LM Studio Qwen 3 VL setup. STAKELAB_MODEL can
+    // override this when LM Studio exposes a machine-specific model ID.
+    static let modelName: String = {
+        let configured = ProcessInfo.processInfo.environment["STAKELAB_MODEL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return configured.isEmpty ? "qwen/qwen3-vl-8b" : configured
+    }()
 
     static func analyze(
         ocrResult:    TableOCRResult,

@@ -1,7 +1,7 @@
 # StakeLab HUD & StakeStream Suite
 
 Native macOS poker assistance co-pilot for Stake.com running on Floorp browser.
-Zero cloud tokens, zero subscription, 100% free local execution via Apple Vision OCR and local Qwen 2.5 7B on LM Studio.
+Zero cloud tokens, zero subscription, 100% free local execution via Apple Vision OCR and local Qwen 3 VL 8B on LM Studio.
 
 ---
 
