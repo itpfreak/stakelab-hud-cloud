@@ -98,6 +98,38 @@ struct HUDToolbar: View {
 
             Spacer()
 
+            // Audio / voice control — kept visible so mute state is never hidden.
+            Menu {
+                Button(settings.voiceAlerts ? "✓ Voice Alerts Enabled" : "Enable Voice Alerts") {
+                    settings.voiceAlerts.toggle()
+                    settings.save()
+                }
+                Divider()
+                Button(settings.voiceName == "Samantha" ? "✓ Samantha (US Natural)" : "Samantha (US Natural)") {
+                    settings.voiceName = "Samantha"
+                    settings.save()
+                }
+                Button(settings.voiceName == "Daniel" ? "✓ Daniel (UK Formal)" : "Daniel (UK Formal)") {
+                    settings.voiceName = "Daniel"
+                    settings.save()
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: settings.voiceAlerts ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                        .font(.system(size: 11))
+                    Text(settings.voiceAlerts ? "Audio" : "Muted")
+                        .font(fzW(10, .bold, .monospaced))
+                }
+                .foregroundStyle(Color.white)
+                .tint(Color.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(settings.voiceAlerts ? C.call.opacity(0.28) : C.fold.opacity(0.28))
+                .clipShape(Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .tint(Color.white)
+
             // Settings Menu
             Menu {
                 Text("Coaching Style:")
@@ -196,6 +228,7 @@ struct HUDToolbar: View {
                 .clipShape(Capsule())
             }
             .menuStyle(.borderlessButton)
+            .tint(Color.white)
         }
     }
 }
