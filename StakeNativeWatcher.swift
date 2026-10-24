@@ -138,6 +138,7 @@ final class NativeWatcherEngine {
     }
 
     private func runCycle(lastHash: inout Data, lastMeaningfulState: inout String) async {
+        let cycleStarted = Date()
         // 1. Find Stake table window in Floorp
         guard let windowID = StakeTableDetector.findStakeWindowID() else {
             let dbg = StakeTableDetector.debugInfo()
@@ -148,6 +149,7 @@ final class NativeWatcherEngine {
         }
 
         // 2. Capture in-memory PNG
+        let captureStarted = Date()
         guard let imageData = ScreenCapture.capture(windowID: windowID) else {
             await MainActor.run {
                 self.store.setWatcherStatus("WARNING: Capture failed -- ensure Screen Recording is granted in System Settings -> Privacy -> Screen Recording")
@@ -155,19 +157,23 @@ final class NativeWatcherEngine {
             return
         }
 
+        let captureMS = Int(Date().timeIntervalSince(captureStarted) * 1000)
+
         // 3. Hash -- skip OCR+LLM if screen unchanged
         let hash = Data(SHA256.hash(data: imageData))
         guard hash != lastHash else { return }
         lastHash = hash
 
         // 4. Read table: locate hero username -> crop cards directly above it + crop board
-        await MainActor.run { self.store.setWatcherStatus("Reading table (seat-anchor)... hero='\(settings.heroUsername)'") }
+        let ocrStarted = Date()
+        await MainActor.run { self.store.setWatcherStatus("Reading table (capture=\(captureMS)ms)... hero='\(settings.heroUsername)'") }
         let ocrResult = await AppleVisionTableReader.read(
             imageData: imageData,
             heroUsername: settings.heroUsername,
             cachedHeroBox: cachedHeroBox
         )
         cachedHeroBox = ocrResult.heroBox ?? cachedHeroBox
+        let ocrMS = Int(Date().timeIntervalSince(ocrStarted) * 1000)
 
         guard !ocrResult.rawText.isEmpty || !ocrResult.heroCards.isEmpty else {
             await MainActor.run {
@@ -232,7 +238,7 @@ final class NativeWatcherEngine {
         )
         await MainActor.run {
             self.store.setAdvice(provisional)
-            self.store.setWatcherStatus("\(summary) -> Asking Qwen 3...")
+            self.store.setWatcherStatus("\(summary) -> Asking Qwen 3 (OCR=\(ocrMS)ms, capture=\(captureMS)ms)...")
         }
         let modelStarted = Date()
 
@@ -246,6 +252,7 @@ final class NativeWatcherEngine {
                 heroUsername: settings.heroUsername
             )
             let modelMS = Int(Date().timeIntervalSince(modelStarted) * 1000)
+            let totalMS = Int(Date().timeIntervalSince(cycleStarted) * 1000)
             // A model request may finish after a fold/new hand was detected.
             // Never let that stale response resurrect advice for the prior hand.
             guard meaningfulState == lastMeaningfulState else { return }
@@ -254,9 +261,9 @@ final class NativeWatcherEngine {
                 self.store.setAdvice(advice)
                 if advice.action == "WAITING" {
                     let msg = advice.recommendation.isEmpty ? "Waiting for action / hand" : advice.recommendation
-                    self.store.setWatcherStatus("Waiting (\(modelMS)ms): \(msg.prefix(60))")
+                    self.store.setWatcherStatus("Waiting (model=\(modelMS)ms total=\(totalMS)ms): \(msg.prefix(60))")
                 } else {
-                    self.store.setWatcherStatus("OK (\(modelMS)ms): \(advice.action) -- \(advice.recommendation.prefix(60))")
+                    self.store.setWatcherStatus("OK (model=\(modelMS)ms total=\(totalMS)ms): \(advice.action) -- \(advice.recommendation.prefix(60))")
                     if self.settings.voiceAlerts && !advice.action.isEmpty && advice.actionOnHero {
                         let sayProc = Process()
                         sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
