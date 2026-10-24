@@ -77,6 +77,7 @@ final class NativeWatcherEngine {
     private let store:    AdviceStore
     private let settings: HUDSettings
     private var task:     Task<Void, Never>?
+    private var cachedHeroBox: CGRect?
     private(set) var isRunning = false
     private(set) var isPaused  = false
 
@@ -161,7 +162,12 @@ final class NativeWatcherEngine {
 
         // 4. Read table: locate hero username -> crop cards directly above it + crop board
         await MainActor.run { self.store.setWatcherStatus("Reading table (seat-anchor)... hero='\(settings.heroUsername)'") }
-        let ocrResult = await AppleVisionTableReader.read(imageData: imageData, heroUsername: settings.heroUsername)
+        let ocrResult = await AppleVisionTableReader.read(
+            imageData: imageData,
+            heroUsername: settings.heroUsername,
+            cachedHeroBox: cachedHeroBox
+        )
+        cachedHeroBox = ocrResult.heroBox ?? cachedHeroBox
 
         guard !ocrResult.rawText.isEmpty || !ocrResult.heroCards.isEmpty else {
             await MainActor.run {
@@ -297,7 +303,7 @@ enum AppleVisionTableReader {
         let box:  CGRect // Vision normalized boundingBox (origin bottom-left)
     }
 
-    static func read(imageData: Data, heroUsername: String) async -> TableOCRResult {
+    static func read(imageData: Data, heroUsername: String, cachedHeroBox: CGRect? = nil) async -> TableOCRResult {
         guard let cgImage = makeCGImage(from: imageData) else {
             return emptyResult()
         }
@@ -316,7 +322,13 @@ enum AppleVisionTableReader {
         // Stage 2: Hero Cards Crop & Read
         // If hero username was located on the table, hero's cards sit DIRECTLY ABOVE the username!
         var heroCards: [String] = []
-        if result.heroFound, let heroBox = result.heroBox {
+        // The hero username is stable while the table is open. Reuse its last
+        // anchor when full-frame OCR misses it during a card animation, so a
+        // new hand does not wait for another successful username recognition.
+        let seatBox = result.heroBox ?? cachedHeroBox
+        if let heroBox = seatBox {
+            if result.heroBox == nil { result.heroBox = heroBox }
+            result.heroFound = true
             // Convert Vision coordinates (origin at bottom-left) to top-down CGImage coordinates
             let topDownX = heroBox.origin.x
             let topDownY = 1.0 - (heroBox.origin.y + heroBox.size.height)
@@ -543,7 +555,9 @@ enum AppleVisionTableReader {
                 }
                 cont.resume(returning: items)
             }
-            req.recognitionLevel       = .accurate
+            // Full-frame OCR only locates metadata/username; use the faster
+            // pass here and reserve accurate OCR for the small card crops.
+            req.recognitionLevel       = .fast
             req.usesLanguageCorrection = false
             req.recognitionLanguages   = ["en-US"]
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
