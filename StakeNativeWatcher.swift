@@ -215,9 +215,15 @@ final class NativeWatcherEngine {
         ].joined(separator: "|")
         guard meaningfulState != latestMeaningfulState else { return }
 
-        // Never invoke the model while folded/observing. Clear stale advice once
-        // when the hand ends, then wait for a new positively detected hand.
-        guard !ocrResult.isHeroFolded && !ocrResult.heroCards.isEmpty else {
+        // OCR can miss graphical hole cards even while the action buttons prove
+        // the hero is active. In cloud mode, let Gemini read the full screenshot
+        // in that case; requiring OCR cards here caused the Advice tab to remain
+        // permanently stuck at its placeholder. No cards + no action buttons
+        // still means observing/folded, so the model remains gated safely.
+        let actionButtonsVisible = !ocrResult.detectedButtons.isEmpty
+        let likelyActiveHand = !ocrResult.isHeroFolded &&
+            (!ocrResult.heroCards.isEmpty || actionButtonsVisible)
+        guard likelyActiveHand else {
             latestMeaningfulState = meaningfulState
             inferenceTask?.cancel()
             inferenceTask = nil
@@ -247,8 +253,8 @@ final class NativeWatcherEngine {
             villainNames:   "",
             gameType:       ocrResult.gameType,
             tableMode:      ocrResult.tableMode,
-            heroHasCards:   true,
-            actionOnHero:   !ocrResult.detectedButtons.isEmpty
+            heroHasCards:   !ocrResult.heroCards.isEmpty,
+            actionOnHero:   actionButtonsVisible
         )
         latestMeaningfulState = meaningfulState
         inferenceTask?.cancel()
