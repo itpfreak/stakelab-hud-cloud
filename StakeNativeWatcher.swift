@@ -821,9 +821,11 @@ CRITICAL RULES:
             board = ocrResult.boardCards.joined(separator: " ")
         }
 
-        let heroHasCards = !ocrResult.isHeroFolded &&
-                           (!hand.isEmpty || !ocrResult.heroCards.isEmpty)
-        let actionOnHero = !ocrResult.isHeroFolded &&
+        // Only face-up cards positively detected in the hero-anchored crop count as
+        // an active hand. Do not let a translucent card back or an LLM guess turn
+        // an observing/folded table into an actionable hand.
+        let heroHasCards = !ocrResult.isHeroFolded && !ocrResult.heroCards.isEmpty
+        let actionOnHero = heroHasCards &&
                            (!ocrResult.detectedButtons.isEmpty ||
                             (act != "WAITING" && !act.isEmpty))
 

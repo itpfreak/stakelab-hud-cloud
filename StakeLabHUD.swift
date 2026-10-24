@@ -1064,21 +1064,26 @@ struct HUDContentView: View {
                     .opacity(store.isIdle ? 0.75 : 1.0)
             }
 
-            HandInfoRow(board: advice.board)
-                .opacity(store.isIdle ? 0.4 : 1.0)
-
-            // Push / Fold Short-Stack Matrix Indicator (< 12 BB)
-            if advice.heroHasCards, let bbVal = Double(advice.bigBlind), bbVal > 0 {
-                PushFoldIndicator(advice: advice, bbVal: bbVal)
+            // Board, tactical hints, and short-stack advice are only relevant
+            // while the hero is actually in a hand. This prevents stale/guessed
+            // advice from appearing over translucent folded/observing cards.
+            if advice.heroHasCards {
+                HandInfoRow(board: advice.board)
                     .opacity(store.isIdle ? 0.4 : 1.0)
-            }
 
-            if !advice.hint.isEmpty {
-                Rectangle().fill(C.divider).frame(height: 1)
-                // Strip opponent context from hints — shown in Players tab instead
-                let cleanHint = advice.hint.components(separatedBy: "\nKNOWN OPPONENTS").first ?? advice.hint
-                HintSection(hint: cleanHint)
-                    .opacity(store.isIdle ? 0.3 : 1.0)
+                // Push / Fold Short-Stack Matrix Indicator (< 12 BB)
+                if let bbVal = Double(advice.bigBlind), bbVal > 0 {
+                    PushFoldIndicator(advice: advice, bbVal: bbVal)
+                        .opacity(store.isIdle ? 0.4 : 1.0)
+                }
+
+                if !advice.hint.isEmpty {
+                    Rectangle().fill(C.divider).frame(height: 1)
+                    // Strip opponent context from hints — shown in Players tab instead
+                    let cleanHint = advice.hint.components(separatedBy: "\nKNOWN OPPONENTS").first ?? advice.hint
+                    HintSection(hint: cleanHint)
+                        .opacity(store.isIdle ? 0.3 : 1.0)
+                }
             }
 
             if store.isIdle {
