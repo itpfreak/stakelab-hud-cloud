@@ -795,7 +795,8 @@ enum StakeGeminiClient {
                 baseURL: proxyBase, apiKey: EnvLoader.value("NOUS_PROXY_KEY").isEmpty ? "sk-unused" : EnvLoader.value("NOUS_PROXY_KEY")
             )
         }
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(ProcessInfo.processInfo.environment["GEMINI_MODEL"] ?? "gemini-3.6-flash"):generateContent?key=\(apiKey)"
+        let model = EnvLoader.value("GEMINI_MODEL").isEmpty ? "gemini-3.7-flash" : EnvLoader.value("GEMINI_MODEL")
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)"
         guard let url = URL(string: endpoint) else {
             throw APIError.parse("Invalid URL")
         }
