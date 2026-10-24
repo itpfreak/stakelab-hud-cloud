@@ -81,7 +81,13 @@ PLIST
 
 # Prefer a stable local signing identity so macOS TCC/Screen Recording grants
 # survive rebuilds. Ad-hoc signatures change identity on every build.
-SIGNING_IDENTITY="${STAKELAB_SIGNING_IDENTITY:-StakeLabDev}"
+if [ -n "${STAKELAB_SIGNING_IDENTITY:-}" ]; then
+    SIGNING_IDENTITY="$STAKELAB_SIGNING_IDENTITY"
+elif AUTO_APPLE_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/Apple Development:/ {print $2; exit}'); then
+    SIGNING_IDENTITY="${AUTO_APPLE_IDENTITY:-StakeLabDev}"
+else
+    SIGNING_IDENTITY="StakeLabDev"
+fi
 if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "\"$SIGNING_IDENTITY\""; then
     echo "→ Signing with stable identity: $SIGNING_IDENTITY"
     codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP"
