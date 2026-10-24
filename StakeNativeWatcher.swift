@@ -117,13 +117,14 @@ final class NativeWatcherEngine {
 
     private func loop() async {
         var lastHash   = Data()
+        var lastMeaningfulState = ""
         var cycleCount = 0
         while !Task.isCancelled {
             if isPaused {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s check while paused
                 continue
             }
-            await runCycle(lastHash: &lastHash)
+            await runCycle(lastHash: &lastHash, lastMeaningfulState: &lastMeaningfulState)
             cycleCount += 1
             if cycleCount % 8 == 0 {
                 let procs = StakeTableDetector.visibleProcessNames()
@@ -135,7 +136,7 @@ final class NativeWatcherEngine {
         }
     }
 
-    private func runCycle(lastHash: inout Data) async {
+    private func runCycle(lastHash: inout Data, lastMeaningfulState: inout String) async {
         // 1. Find Stake table window in Floorp
         guard let windowID = StakeTableDetector.findStakeWindowID() else {
             let dbg = StakeTableDetector.debugInfo()
@@ -173,7 +174,36 @@ final class NativeWatcherEngine {
             ? "Hero '\(settings.heroUsername)' [\(ocrResult.heroSeat)]"
             : "Hero '\(settings.heroUsername)' [searching]"
         let summary = "\(heroStatus): cards=\(ocrResult.heroCards) board=\(ocrResult.boardCards) pot=\(ocrResult.potSize.isEmpty ? "-" : ocrResult.potSize) btns=\(ocrResult.detectedButtons) src=\(ocrResult.cardSource)"
+
+        // Ignore animation/timer changes that do not alter poker state. This is
+        // the main latency win: OCR can continue, but Qwen only runs when cards,
+        // board, action buttons, pot/stack, or HUD settings actually change.
+        let meaningfulState = [
+            ocrResult.heroCards.joined(separator: ","),
+            ocrResult.boardCards.joined(separator: ","),
+            ocrResult.detectedButtons.joined(separator: ","),
+            ocrResult.potSize, ocrResult.heroStack,
+            ocrResult.smallBlind, ocrResult.bigBlind, ocrResult.ante,
+            ocrResult.heroFound ? "hero-found" : "hero-missing",
+            ocrResult.isHeroFolded ? "folded" : "live",
+            settings.gameMode.rawValue, settings.coachingStyle.rawValue,
+            settings.tournamentStructure.rawValue, settings.tournamentStage.rawValue
+        ].joined(separator: "|")
+        guard meaningfulState != lastMeaningfulState else { return }
+
+        // Never invoke the model while folded/observing. Clear stale advice once
+        // when the hand ends, then wait for a new positively detected hand.
+        guard !ocrResult.isHeroFolded && !ocrResult.heroCards.isEmpty else {
+            lastMeaningfulState = meaningfulState
+            await MainActor.run {
+                self.store.clearAdvice()
+                self.store.setWatcherStatus("No active hero hand — model skipped")
+            }
+            return
+        }
+
         await MainActor.run { self.store.setWatcherStatus("\(summary) -> Asking Qwen 2.5...") }
+        let modelStarted = Date()
 
         do {
             let advice = try await LMStudioClient.analyze(
@@ -184,13 +214,15 @@ final class NativeWatcherEngine {
                 stage:        settings.tournamentStage.rawValue,
                 heroUsername: settings.heroUsername
             )
+            let modelMS = Int(Date().timeIntervalSince(modelStarted) * 1000)
+            lastMeaningfulState = meaningfulState
             await MainActor.run {
                 self.store.setAdvice(advice)
                 if advice.action == "WAITING" {
                     let msg = advice.recommendation.isEmpty ? "Waiting for action / hand" : advice.recommendation
-                    self.store.setWatcherStatus("Waiting: \(msg.prefix(60))")
+                    self.store.setWatcherStatus("Waiting (\(modelMS)ms): \(msg.prefix(60))")
                 } else {
-                    self.store.setWatcherStatus("OK: \(advice.action) -- \(advice.recommendation.prefix(60))")
+                    self.store.setWatcherStatus("OK (\(modelMS)ms): \(advice.action) -- \(advice.recommendation.prefix(60))")
                     if self.settings.voiceAlerts && !advice.action.isEmpty && advice.actionOnHero {
                         let sayProc = Process()
                         sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
@@ -700,10 +732,10 @@ CRITICAL RULES:
                 ["role": "user",   "content": tableJSON]
             ],
             "temperature": 0.1,
-            "max_tokens":  300
+            "max_tokens":  160
         ]
 
-        var req = URLRequest(url: url, timeoutInterval: 10)
+        var req = URLRequest(url: url, timeoutInterval: 6)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody   = try JSONSerialization.data(withJSONObject: body)
