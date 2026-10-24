@@ -781,7 +781,10 @@ CRITICAL RULES:
                 ["role": "user",   "content": tableJSON]
             ],
             "temperature": 0.1,
-            "max_tokens":  160
+            "max_tokens":  160,
+            // Live poker needs a direct answer, not Qwen 3's optional
+            // chain-of-thought reasoning pass.
+            "chat_template_kwargs": ["enable_thinking": false]
         ]
 
         var req = URLRequest(url: url, timeoutInterval: 6)
