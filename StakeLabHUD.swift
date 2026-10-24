@@ -1410,7 +1410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        let quitItem = NSMenuItem(title: "Quit Stake Lab HUD", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Stake Lab HUD Cloud", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
@@ -1435,7 +1435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         guard let window = window else { return }
 
-        window.title           = "Stake Lab HUD"
+        window.title           = "Stake Lab HUD Cloud"
         window.isOpaque        = true
         window.backgroundColor = NSColor(red: 0.10, green: 0.12, blue: 0.18, alpha: 1.0)
         window.hasShadow       = true
@@ -1468,7 +1468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         window.makeKeyAndOrderFront(nil)
 
-        print("✅ Stake Lab HUD launched — \(store.dbPath) | mode: \(settings.gameMode.rawValue)")
+        print("✅ Stake Lab HUD Cloud launched — \(store.dbPath) | mode: \(settings.gameMode.rawValue)")
     }
 
     func positionOnSecondaryMonitor() {
