@@ -11,7 +11,7 @@ REPO_ROOT_APP="$SCRIPT_DIR/StakeLabHUDCloud.app"
 DOWNLOADS_APP="$HOME/Downloads/StakeLabHUDCloud.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
-BUILD_ID="stakelab-cloud-gemini-direct-b283a17"
+BUILD_ID="stakelab-cloud-gemini-direct-6816ab9"
 
 echo ""
 echo "=== Building Stake Lab HUD (Native Swift / Local Qwen) ==="
@@ -73,6 +73,8 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
     <string>Stake Lab HUD needs Screen Recording to read the Stake.com poker table in Floorp.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Stake Lab HUD needs Automation access to track the Floorp browser window position.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Stake Lab HUD uses system audio recording only when audio alerts are enabled.</string>
 </dict>
 </plist>
 PLIST

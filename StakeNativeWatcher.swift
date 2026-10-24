@@ -92,6 +92,14 @@ final class NativeWatcherEngine {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        // Request Screen Recording at app startup, before searching for Floorp.
+        // This ensures macOS registers this bundle even when no table window is
+        // open yet; previously the request only happened after window discovery.
+        if !ScreenCapture.requestAccess() {
+            Task { @MainActor in
+                self.store.setWatcherStatus("Screen Recording permission required for Stake Lab HUD Cloud")
+            }
+        }
         task = Task(priority: .utility) { [weak self] in
             await self?.loop()
         }
@@ -810,6 +818,13 @@ enum StakeTableDetector {
 // MARK: - Screen Capture
 
 enum ScreenCapture {
+    static func requestAccess() -> Bool {
+        guard #available(macOS 14.0, *) else { return false }
+        if CGPreflightScreenCaptureAccess() { return true }
+        CGRequestScreenCaptureAccess()
+        return false
+    }
+
     // Capture in-process so macOS attributes the Screen Recording grant to
     // StakeLabHUDCloud, not to the /usr/sbin/screencapture helper process.
     static func capture(windowID: CGWindowID) async -> Data? {
