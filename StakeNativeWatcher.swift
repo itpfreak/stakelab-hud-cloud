@@ -240,6 +240,9 @@ final class NativeWatcherEngine {
                 heroUsername: settings.heroUsername
             )
             let modelMS = Int(Date().timeIntervalSince(modelStarted) * 1000)
+            // A model request may finish after a fold/new hand was detected.
+            // Never let that stale response resurrect advice for the prior hand.
+            guard meaningfulState == lastMeaningfulState else { return }
             lastMeaningfulState = meaningfulState
             await MainActor.run {
                 self.store.setAdvice(advice)
