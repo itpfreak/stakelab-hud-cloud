@@ -202,7 +202,32 @@ final class NativeWatcherEngine {
             return
         }
 
-        await MainActor.run { self.store.setWatcherStatus("\(summary) -> Asking Qwen 2.5...") }
+        // Publish the OCR-grounded hand immediately. Do not make the HUD wait
+        // for the local model before showing a newly dealt hand; Qwen can still
+        // refine the recommendation asynchronously below.
+        let provisional = PokerAdvice(
+            id:             Int(Date().timeIntervalSince1970 * 1000) & Int.max,
+            hand:           ocrResult.heroCards.joined(separator: " "),
+            position:       "",
+            board:          ocrResult.boardCards.joined(separator: " "),
+            action:         "WAITING",
+            recommendation: ocrResult.detectedButtons.isEmpty ? "Waiting for action." : "Action detected — analyzing.",
+            confidence:     0,
+            hint:           "",
+            timestamp:      ISO8601DateFormatter().string(from: Date()),
+            smallBlind:     ocrResult.smallBlind,
+            bigBlind:       ocrResult.bigBlind,
+            ante:           ocrResult.ante,
+            villainNames:   "",
+            gameType:       ocrResult.gameType,
+            tableMode:      ocrResult.tableMode,
+            heroHasCards:   true,
+            actionOnHero:   !ocrResult.detectedButtons.isEmpty
+        )
+        await MainActor.run {
+            self.store.setAdvice(provisional)
+            self.store.setWatcherStatus("\(summary) -> Asking Qwen 2.5...")
+        }
         let modelStarted = Date()
 
         do {
@@ -720,9 +745,10 @@ CRITICAL RULES:
 2. If "is_hero_folded" is true or "hero_cards" is empty, set "hand" to "", "hero_has_cards" to false, "action_on_hero" to false, "action" to "WAITING", recommendation to "Folded — observing table".
 3. If "hero_cards" has entries (e.g. ["Ad","3d"]), output them space-separated in "hand" (e.g. "Ad 3d").
 4. If "has_action_buttons" is true, action_on_hero is TRUE. Give an actionable recommendation. Do NOT return WAITING when buttons are visible.
-5. Keep recommendation under 28 words. hint under 18 words and include the main reason (pot odds, stack depth, draw equity, villain tendency, or ICM).
-6. "action" must be a SINGLE value: FOLD, CALL, CHECK, RAISE, BET, or WAITING — never pipe-separated.
-7. Structure/stage guidance: TURBO/HYPER increases steal/rejam urgency and lowers tolerance for speculative flats; BUBBLE/FINAL_TABLE increases ICM survival, especially as a medium stack; EARLY/MIDDLE prioritizes chip EV and accumulation over pure survival.
+5. Treat the exact `hero_cards` array as ground truth. Never reinterpret, reorder, or invent a different rank/suit in `hand` or the recommendation.
+6. Keep recommendation under 28 words. hint under 18 words and include the main reason (pot odds, stack depth, draw equity, villain tendency, or ICM).
+7. "action" must be a SINGLE value: FOLD, CALL, CHECK, RAISE, BET, or WAITING — never pipe-separated.
+8. Structure/stage guidance: TURBO/HYPER increases steal/rejam urgency and lowers tolerance for speculative flats; BUBBLE/FINAL_TABLE increases ICM survival, especially as a medium stack; EARLY/MIDDLE prioritizes chip EV and accumulation over pure survival.
 """
 
         let body: [String: Any] = [
