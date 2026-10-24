@@ -83,12 +83,15 @@ PLIST
 # survive rebuilds. Ad-hoc signatures change identity on every build.
 if [ -n "${STAKELAB_SIGNING_IDENTITY:-}" ]; then
     SIGNING_IDENTITY="$STAKELAB_SIGNING_IDENTITY"
-elif AUTO_APPLE_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/Apple Development:/ {print $2; exit}'); then
-    SIGNING_IDENTITY="${AUTO_APPLE_IDENTITY:-StakeLabDev}"
-elif security find-identity -v -p codesigning 2>/dev/null | grep -Fq '"StakeLabCloudDev2"'; then
-    SIGNING_IDENTITY="StakeLabCloudDev2"
 else
-    SIGNING_IDENTITY="StakeLabDev"
+    AUTO_APPLE_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/Apple Development:/ {print $2; exit}')
+    if [ -n "$AUTO_APPLE_IDENTITY" ]; then
+        SIGNING_IDENTITY="$AUTO_APPLE_IDENTITY"
+    elif security find-identity -v -p codesigning 2>/dev/null | grep -Fq '"StakeLabCloudDev2"'; then
+        SIGNING_IDENTITY="StakeLabCloudDev2"
+    else
+        SIGNING_IDENTITY="StakeLabDev"
+    fi
 fi
 if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "\"$SIGNING_IDENTITY\""; then
     echo "→ Signing with stable identity: $SIGNING_IDENTITY"
