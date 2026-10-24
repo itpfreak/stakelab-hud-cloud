@@ -312,6 +312,7 @@ struct TableOCRResult {
     var heroStack:       String
     var smallBlind:      String
     var bigBlind:        String
+    var ante:            String
     var gameType:        String
     var tableMode:       String
     var villainInfo:     String
@@ -711,6 +712,7 @@ enum AppleVisionTableReader {
             heroStack:       heroStack,
             smallBlind:      smallBlind,
             bigBlind:        bigBlind,
+            ante:            "",
             gameType:        gameType,
             tableMode:       tableMode,
             villainInfo:     villainLines.suffix(10).joined(separator: "; "),
@@ -733,7 +735,7 @@ enum AppleVisionTableReader {
 
     private static func emptyResult() -> TableOCRResult {
         TableOCRResult(rawText: "", heroCards: [], boardCards: [], potSize: "",
-                       heroStack: "", smallBlind: "", bigBlind: "",
+                       heroStack: "", smallBlind: "", bigBlind: "", ante: "",
                        gameType: "", tableMode: "", villainInfo: "",
                        detectedButtons: [], heroFound: false, heroSeat: "",
                        heroBox: nil,
