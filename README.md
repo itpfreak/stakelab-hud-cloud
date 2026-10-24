@@ -1,16 +1,16 @@
-# StakeLab HUD & StakeStream Suite
+# Stake Lab HUD Cloud
 
 Native macOS poker assistance co-pilot for Stake.com running on Floorp browser.
-Zero cloud tokens, zero subscription, 100% free local execution via Apple Vision OCR and local Qwen 3 VL 8B on LM Studio.
+Cloud-model experiment using Gemini vision analysis for Stake.com. This is intentionally separate from the local Qwen project.
 
 ---
 
 ## Two Purpose-Built Modes
 
-### 1. `StakeLabHUD.app` (Solo / Off-Stream Grinder)
+### 1. `StakeLabHUDCloud.app` (Solo / Off-Stream Grinder)
 * **What it is:** Floating SwiftUI HUD window on your iMac desktop.
 * **Safety:** Protected by macOS compositor exclusion (`NSWindow.sharingType = .none`).
-* **Build:** `bash build_app.sh` → installs to `/Applications/StakeLabHUD.app`.
+* **Build:** `bash build_app.sh` → installs to `/Applications/StakeLabHUDCloud.app`.
 
 ### 2. `StakeStream` (Live Broadcast / Headless Air-Gap)
 * **What it is:** 100% headless background daemon. Stripped of all on-screen AppKit window code. Impossible to leak onto stream capture buffers.
@@ -28,4 +28,15 @@ Zero cloud tokens, zero subscription, 100% free local execution via Apple Vision
 ## Build All
 ```bash
 bash build_all.sh
+```
+
+
+## Cloud test setup
+
+This project is separate from `stakelab-hud` and uses Gemini vision models. Put `GEMINI_API_KEY` in `~/stakelab-hud-cloud/.env` on the Mac; never commit that file. The default model is configurable with `GEMINI_MODEL` and currently defaults to `gemini-3.6-flash`.
+
+Build:
+
+```bash
+cd ~/stakelab-hud-cloud && git pull && bash build_app.sh && open /Applications/StakeLabHUDCloud.app
 ```

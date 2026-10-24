@@ -252,6 +252,7 @@ final class NativeWatcherEngine {
         // the previous hand displayed while the next hand is being dealt.
         let requestState = meaningfulState
         let requestOCR = ocrResult
+        let requestImageData = imageData
         let requestMode = settings.gameMode.rawValue
         let requestStyle = settings.coachingStyle.rawValue
         let requestStructure = settings.tournamentStructure.rawValue
@@ -261,13 +262,15 @@ final class NativeWatcherEngine {
         inferenceTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let advice = try await LMStudioClient.analyze(
-                    ocrResult: requestOCR,
+                let apiKey = EnvLoader.geminiKey()
+                guard !apiKey.isEmpty else {
+                    throw StakeGeminiClient.APIError.parse("GEMINI_API_KEY missing — set it in ~/stakelab-hud-cloud/.env")
+                }
+                let advice = try await StakeGeminiClient.analyze(
+                    imageData: requestImageData,
                     mode: requestMode,
                     style: requestStyle,
-                    structure: requestStructure,
-                    stage: requestStage,
-                    heroUsername: requestUsername
+                    apiKey: apiKey
                 )
                 guard !Task.isCancelled, requestState == self.latestMeaningfulState else { return }
                 let modelMS = Int(Date().timeIntervalSince(requestStarted) * 1000)
@@ -1047,5 +1050,200 @@ enum ScreenCapture {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmpPath)),
               data.count > 500 else { return nil }
         return data
+    }
+}
+
+
+// MARK: - .env Loader
+
+enum EnvLoader {
+    static func geminiKey() -> String {
+        let home = NSHomeDirectory()
+        let paths = [
+            "\(home)/stakelab-hud-cloud/.env",
+            "\(home)/stakelab-hud/.env",
+            "\(home)/freakslab-poker-hud/.env",
+            "\(home)/.env"
+        ]
+        for path in paths {
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            for raw in text.components(separatedBy: "\n") {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                guard !line.hasPrefix("#"), line.hasPrefix("GEMINI_API_KEY=") else { continue }
+                return line
+                    .dropFirst("GEMINI_API_KEY=".count)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            }
+        }
+        return ProcessInfo.processInfo.environment["GEMINI_API_KEY"] ?? ""
+    }
+}
+
+
+// MARK: - Stake Gemini Vision Client
+
+enum StakeGeminiClient {
+
+    enum APIError: Swift.Error, LocalizedError {
+        case http(Int, String), parse(String)
+        var errorDescription: String? {
+            switch self {
+            case .http(let c, let b): return "HTTP \(c): \(b.prefix(160))"
+            case .parse(let m):       return "Parse: \(m)"
+            }
+        }
+    }
+
+    static func analyze(
+        imageData: Data,
+        mode:      String,
+        style:     String,
+        apiKey:    String
+    ) async throws -> PokerAdvice {
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(ProcessInfo.processInfo.environment["GEMINI_MODEL"] ?? "gemini-3.6-flash"):generateContent?key=\(apiKey)"
+        guard let url = URL(string: endpoint) else {
+            throw APIError.parse("Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 45)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
+        // Resize large images (browser windows can be 2560px+ Retina) to avoid timeouts
+        if let resized = resizeImageData(imageData, maxWidth: 1280) {
+            req.httpBody = try buildBody(imageData: resized, mode: mode, style: style)
+        }
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw APIError.http(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        return try parseResponse(data: data)
+    }
+
+    private static func resizeImageData(_ data: Data, maxWidth: CGFloat) -> Data? {
+        guard let src = NSImage(data: data), src.size.width > maxWidth else { return nil }
+        let scale   = maxWidth / src.size.width
+        let newSize = NSSize(width: maxWidth, height: src.size.height * scale)
+        let dst = NSImage(size: newSize)
+        dst.lockFocus()
+        src.draw(in: NSRect(origin: .zero, size: newSize),
+                 from: NSRect(origin: .zero, size: src.size),
+                 operation: .copy, fraction: 1.0)
+        dst.unlockFocus()
+        guard let tiff = dst.tiffRepresentation,
+              let rep  = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func buildBody(imageData: Data, mode: String, style: String) throws -> Data {
+        // Stake.com UI layout description:
+        // - Dark green felt table, octagonal, 8 seats
+        // - Hero (bottom center): hole cards shown bottom-left of table area
+        // - Community cards: center of table (empty pre-flop)
+        // - Pot: center-top of table in white text
+        // - Action buttons: bottom bar — Fold (red/grey), Check (blue), Raise (green/orange)
+        // - Villain avatars: circular, around table perimeter, stack size below each in white $
+        // - Active player: timer ring highlighted around their seat
+        // - Game info top: "London #3 · NLHE · $0.01/$0.02"
+        // - Cards: standard suit symbols, dark background, colored suits
+
+        let prompt = """
+        You are an expert poker coach analyzing a Stake.com online poker screenshot from the Floorp browser.
+
+        STAKE.COM UI LAYOUT (use this to locate elements):
+        - Dark green felt table, octagonal shape, up to 8 player seats around perimeter
+        - Hero seat: BOTTOM CENTER — hole cards shown near hero's seat area
+        - Community cards: CENTER of table (pre-flop = empty, flop/turn/river visible)
+        - Pot size: CENTER-TOP of table in white text (e.g. "$0.05")
+        - Action buttons: BOTTOM BAR — Fold (left), Check/Call (center), Raise/Bet (right)
+        - Villain avatars: circular icons around table perimeter, $ stack below each
+        - Active player: highlighted timer ring around their seat
+        - Game info: top of screen — format "TableName · NLH/PLO · $SB/$BB"
+        - Cards: standard suits (♠♥♦♣), white/colored text on dark card backgrounds
+
+        Game mode: \(mode) | Coaching style: \(style)
+
+        Analyze the screenshot and return ONLY a JSON object — no markdown, no explanation:
+        {
+          "hand":           "hero hole cards e.g. '4s Th' using s/h/d/c for suits, or empty string",
+          "position":       "BTN | CO | HJ | MP | UTG | SB | BB | EP, or empty",
+          "board":          "community cards e.g. 'Ah Kd 2c' or empty if pre-flop",
+          "action":         "FOLD | CALL | CHECK | RAISE | BET | WAITING",
+          "recommendation": "one concise coaching sentence",
+          "confidence":     integer 0-100,
+          "hint":           "key read: pot odds, opponent tendency, or board texture note",
+          "small_blind":    "SB amount e.g. '0.01' or empty",
+          "big_blind":      "BB amount e.g. '0.02' or empty",
+          "ante":           "ante amount or empty",
+          "villain_names":  "comma-separated visible villain usernames or empty",
+          "game_type":      "NLH | PLO | SHORT",
+          "table_mode":     "CASH | TOURNEY",
+          "hero_has_cards": true or false,
+          "action_on_hero": true or false
+        }
+
+        Use action WAITING if: no active hand, hero folded, or it is not hero's turn.
+        """
+
+        let body: [String: Any] = [
+            "contents": [["parts": [
+                ["text": prompt],
+                ["inline_data": [
+                    "mime_type": "image/png",
+                    "data": imageData.base64EncodedString()
+                ]]
+            ]]],
+            "generationConfig": ["temperature": 0.15, "maxOutputTokens": 400]
+        ]
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private static func parseResponse(data: Data) throws -> PokerAdvice {
+        guard
+            let root  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let cands = root["candidates"] as? [[String: Any]],
+            let cont  = cands.first?["content"] as? [String: Any],
+            let parts = cont["parts"] as? [[String: Any]],
+            var text  = parts.first?["text"] as? String
+        else { throw APIError.parse("Unexpected Gemini response structure") }
+
+        // Strip markdown fences
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for fence in ["```json", "```"] {
+            if text.hasPrefix(fence) { text = String(text.dropFirst(fence.count)) }
+        }
+        if text.hasSuffix("```") { text = String(text.dropLast(3)) }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard
+            let jd = text.data(using: .utf8),
+            let d  = try? JSONSerialization.jsonObject(with: jd) as? [String: Any]
+        else { throw APIError.parse("JSON decode failed: \(text.prefix(200))") }
+
+        let s   = { (k: String) -> String in d[k] as? String ?? "" }
+        let ts  = ISO8601DateFormatter().string(from: Date())
+        let id  = Int(Date().timeIntervalSince1970 * 1000) & Int.max
+        let act = s("action")
+
+        return PokerAdvice(
+            id:             id,
+            hand:           s("hand"),
+            position:       s("position"),
+            board:          s("board"),
+            action:         act,
+            recommendation: s("recommendation"),
+            confidence:     d["confidence"] as? Int ?? 0,
+            hint:           s("hint"),
+            timestamp:      ts,
+            smallBlind:     s("small_blind"),
+            bigBlind:       s("big_blind"),
+            ante:           s("ante"),
+            villainNames:   s("villain_names"),
+            gameType:       s("game_type"),
+            tableMode:      s("table_mode").isEmpty ? "CASH" : s("table_mode"),
+            heroHasCards:   (d["hero_has_cards"] as? Bool) ?? (act != "WAITING"),
+            actionOnHero:   (d["action_on_hero"] as? Bool) ?? (act != "WAITING" && !act.isEmpty)
+        )
     }
 }

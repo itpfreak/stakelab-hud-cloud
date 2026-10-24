@@ -3,12 +3,12 @@
 # Target: Stake.com in Floorp browser
 set -e
 
-APP="/Applications/StakeLabHUD.app"
-ALT_APP="$HOME/Applications/StakeLabHUD.app"
+APP="/Applications/StakeLabHUDCloud.app"
+ALT_APP="$HOME/Applications/StakeLabHUDCloud.app"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_BUILD_APP="$SCRIPT_DIR/build/StakeLabHUD.app"
-REPO_ROOT_APP="$SCRIPT_DIR/StakeLabHUD.app"
-DOWNLOADS_APP="$HOME/Downloads/StakeLabHUD.app"
+REPO_BUILD_APP="$SCRIPT_DIR/build/StakeLabHUDCloud.app"
+REPO_ROOT_APP="$SCRIPT_DIR/StakeLabHUDCloud.app"
+DOWNLOADS_APP="$HOME/Downloads/StakeLabHUDCloud.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
 BUILD_ID="stakelab-local-qwen-stage-structure-advice-layout"
@@ -18,16 +18,16 @@ echo "=== Building Stake Lab HUD (Native Swift / Local Qwen) ==="
 echo "Build ID: $BUILD_ID"
 echo ""
 
-pkill -9 StakeLabHUD 2>/dev/null || true
+pkill -9 StakeLabHUDCloud 2>/dev/null || true
 rm -rf "$APP" "$ALT_APP" "$REPO_BUILD_APP" "$REPO_ROOT_APP" "$DOWNLOADS_APP"
 mkdir -p "$MACOS" "$RES"
 
-echo "→ Compiling Swift (StakeCommon + StakeLabHUD + StakeNativeWatcher)..."
+echo "→ Compiling Swift (StakeCommon + StakeLabHUDCloud + StakeNativeWatcher)..."
 swiftc \
     StakeCommon.swift \
     StakeLabHUD.swift \
     StakeNativeWatcher.swift \
-    -o "$MACOS/StakeLabHUD" \
+    -o "$MACOS/StakeLabHUDCloud" \
     -lsqlite3 \
     -framework AppKit \
     -framework Foundation \
@@ -35,7 +35,7 @@ swiftc \
     -framework Vision \
     -framework CoreImage
 
-if [ ! -f "$MACOS/StakeLabHUD" ]; then
+if [ ! -f "$MACOS/StakeLabHUDCloud" ]; then
     echo "❌ Compile failed — binary missing"
     exit 1
 fi
@@ -48,11 +48,11 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>StakeLabHUD</string>
+    <string>StakeLabHUDCloud</string>
     <key>CFBundleIdentifier</key>
-    <string>com.stakelab.hud</string>
+    <string>com.stakelab.hud.cloud</string>
     <key>CFBundleName</key>
-    <string>StakeLabHUD</string>
+    <string>StakeLabHUDCloud</string>
     <key>CFBundleDisplayName</key>
     <string>Stake Lab HUD</string>
     <key>CFBundleVersion</key>
@@ -86,7 +86,7 @@ echo "→ Registering with LaunchServices..."
     -f "$APP" 2>/dev/null || true
 
 echo ""
-echo "✅ StakeLabHUD.app built at $APP"
+echo "✅ StakeLabHUDCloud.app built at $APP"
 echo ""
 echo "First launch: right-click → Open to bypass Gatekeeper"
 echo "Then grant Screen Recording in System Settings → Privacy"
