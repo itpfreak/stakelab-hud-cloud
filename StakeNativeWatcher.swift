@@ -319,7 +319,11 @@ enum StakeGeminiClient {
         var req = URLRequest(url: url, timeoutInterval: 45)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
+        // Retina Floorp captures can be several thousand pixels wide. Send a
+        // smaller PNG to Gemini so card details remain clear without paying the
+        // latency penalty of the full browser-sized image.
+        let payload = resizeImageData(imageData, maxWidth: 1280) ?? imageData
+        req.httpBody = try buildBody(imageData: payload, mode: mode, style: style)
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -340,7 +344,7 @@ enum StakeGeminiClient {
         dst.unlockFocus()
         guard let tiff = dst.tiffRepresentation,
               let rep  = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75])
+        return rep.representation(using: .png, properties: [:])
     }
 
     private static func buildBody(imageData: Data, mode: String, style: String) throws -> Data {
