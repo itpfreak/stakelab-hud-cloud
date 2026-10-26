@@ -133,13 +133,15 @@ final class NativeWatcherEngine {
                 style:     settings.coachingStyle.rawValue,
                 apiKey:    apiKey
             )
-            guard advice.action != "WAITING" else {
-                await MainActor.run { self.store.setWatcherStatus("Waiting for hand…") }
-                return
-            }
+            // Always publish Gemini's response, including WAITING responses.
+            // A WAITING action can still contain the correctly detected hand;
+            // dropping it makes the HUD appear to miss the cards entirely.
             await MainActor.run {
                 self.store.setAdvice(advice)
-                self.store.setWatcherStatus("✅ \(advice.action) — \(advice.recommendation.prefix(60))")
+                let status = advice.action == "WAITING"
+                    ? "Waiting — hand: \(advice.hand.isEmpty ? "unknown" : advice.hand)"
+                    : "✅ \(advice.action) — \(advice.recommendation.prefix(60))"
+                self.store.setWatcherStatus(status)
                 if self.settings.voiceAlerts && !advice.action.isEmpty {
                     let sayProc = Process()
                     sayProc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
@@ -368,6 +370,14 @@ enum StakeGeminiClient {
         - Cards: standard suits (♠♥♦♣), white/colored text on dark card backgrounds
 
         Game mode: \(mode) | Coaching style: \(style)
+
+        CARD IDENTIFICATION RULES:
+        - The hero username is exactly "J4clubs". It is not a poker hand.
+        - The hero is the bottom-center player in this screenshot. Read only the two face-up cards immediately above the J4clubs label.
+        - The community cards are only the face-up row in the center of the table.
+        - The table uses four colors: red hearts, blue diamonds, green clubs, black/dark spades.
+        - Never invent a card. If a card is unclear, use "?" for the unclear rank or suit.
+        - If the two hero cards are visible but it is not the hero's turn, report the cards and use action WAITING.
 
         Analyze the screenshot and return ONLY a JSON object — no markdown, no explanation:
         {"hand":"","position":"BTN|CO|HJ|MP|UTG|SB|BB","board":"","action":"FOLD|CALL|CHECK|RAISE|BET|WAITING","recommendation":"","confidence":0,"hint":"","small_blind":"","big_blind":"","ante":"","villain_names":"","game_type":"NLH|PLO","table_mode":"CASH|TOURNEY","hero_has_cards":true,"action_on_hero":true}
