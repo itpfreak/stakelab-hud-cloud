@@ -87,7 +87,7 @@ final class NativeWatcherEngine {
                     self.store.setWatcherStatus("Scanning... Visible apps: \(procs)")
                 }
             }
-            try? await Task.sleep(nanoseconds: 750_000_000) // 0.75s
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
         }
     }
 
@@ -322,7 +322,7 @@ enum StakeGeminiClient {
         // Retina Floorp captures can be several thousand pixels wide. Send a
         // smaller PNG to Gemini so card details remain clear without paying the
         // latency penalty of the full browser-sized image.
-        let payload = resizeImageData(imageData, maxWidth: 1280) ?? imageData
+        let payload = resizeImageData(imageData, maxWidth: 1024) ?? imageData
         req.httpBody = try buildBody(imageData: payload, mode: mode, style: style)
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
