@@ -14,7 +14,7 @@ RES="$APP/Contents/Resources"
 BUILD_ID="stakelab-cloud-gemini-direct-6816ab9"
 
 echo ""
-echo "=== Building Stake Lab HUD (Native Swift / Local Qwen) ==="
+echo "=== Building Stake Lab HUD Cloud (Legacy Gemini Vision) ==="
 echo "Build ID: $BUILD_ID"
 echo ""
 
@@ -32,8 +32,6 @@ swiftc \
     -framework AppKit \
     -framework Foundation \
     -framework CryptoKit \
-    -framework Vision \
-    -framework CoreImage \
     -framework ScreenCaptureKit \
     -framework ImageIO
 
