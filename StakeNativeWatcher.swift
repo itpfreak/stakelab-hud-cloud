@@ -954,7 +954,7 @@ enum StakeGeminiClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
         // Resize large images (browser windows can be 2560px+ Retina) to avoid timeouts
-        if let resized = resizeImageData(imageData, maxWidth: 1280) {
+        if let resized = resizeImageData(imageData, maxWidth: 1024) {
             req.httpBody = try buildBody(imageData: resized, mode: mode, style: style)
         }
         let (data, response) = try await URLSession.shared.data(for: req)
@@ -1049,7 +1049,7 @@ enum StakeGeminiClient {
                     "data": imageData.base64EncodedString()
                 ]]
             ]]],
-            "generationConfig": ["temperature": 0.15, "maxOutputTokens": 400]
+            "generationConfig": ["temperature": 0.1, "maxOutputTokens": 160]
         ]
         return try JSONSerialization.data(withJSONObject: body)
     }
