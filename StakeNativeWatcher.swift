@@ -290,10 +290,32 @@ final class NativeWatcherEngine {
                     apiKey: apiKey
                 )
                 guard !Task.isCancelled, requestState == self.latestMeaningfulState else { return }
+                // OCR/color-grounded card facts outrank the model's free-form visual guess.
+                // Gemini still supplies strategy, but may not replace cards that were
+                // positively detected in the permitted hero/board regions.
+                let groundedAdvice = PokerAdvice(
+                    id: advice.id,
+                    hand: requestOCR.heroCards.isEmpty ? advice.hand : requestOCR.heroCards.joined(separator: " "),
+                    position: advice.position,
+                    board: requestOCR.boardCards.isEmpty ? advice.board : requestOCR.boardCards.joined(separator: " "),
+                    action: advice.action,
+                    recommendation: advice.recommendation,
+                    confidence: advice.confidence,
+                    hint: advice.hint,
+                    timestamp: advice.timestamp,
+                    smallBlind: advice.smallBlind,
+                    bigBlind: advice.bigBlind,
+                    ante: advice.ante,
+                    villainNames: advice.villainNames,
+                    gameType: advice.gameType,
+                    tableMode: advice.tableMode,
+                    heroHasCards: !requestOCR.heroCards.isEmpty || advice.heroHasCards,
+                    actionOnHero: advice.actionOnHero
+                )
                 let modelMS = Int(Date().timeIntervalSince(requestStarted) * 1000)
                 await MainActor.run {
                     guard requestState == self.latestMeaningfulState else { return }
-                    self.store.setAdvice(advice)
+                    self.store.setAdvice(groundedAdvice)
                     self.store.latencyText = "model \(modelMS)ms / OCR \(ocrMS)ms"
                     if advice.action == "WAITING" {
                         let msg = advice.recommendation.isEmpty ? "Waiting for action / hand" : advice.recommendation
@@ -500,7 +522,7 @@ enum AppleVisionTableReader {
                             let sampleRect = CGRect(x: CGFloat(idx) * halfW, y: 0, width: halfW, height: cropH)
                             suit = detectSuitFromColor(cgImage: cgImage, in: sampleRect)
                         }
-                        finalCards.append(token.rank + (suit.isEmpty ? "s" : suit))
+                        finalCards.append(token.rank + (suit.isEmpty ? "?" : suit))
                     }
                 } else {
                     // Board cards: up to 5 cards (Flop 3, Turn 4, River 5)
@@ -516,7 +538,7 @@ enum AppleVisionTableReader {
                             )
                             suit = detectSuitFromColor(cgImage: cgImage, in: pixelRect)
                         }
-                        finalCards.append(token.rank + (suit.isEmpty ? "s" : suit))
+                        finalCards.append(token.rank + (suit.isEmpty ? "?" : suit))
                     }
                 }
 
@@ -973,6 +995,16 @@ enum StakeGeminiClient {
         let prompt = """
         You are an expert poker coach analyzing a Stake.com online poker screenshot from the Floorp browser.
 
+        HARD CARD-GROUNDING RULES — FOLLOW THESE BEFORE ANY STRATEGY:
+        - The hero username is exactly "J4clubs". It is a username, never a poker hand.
+        - Never parse "J4clubs", "J4", or any username text as hero cards.
+        - Hero hole cards may be read only from the two visible face-up card rectangles immediately above the J4clubs username.
+        - Community cards may be read only from the face-up card row in the center of the green table.
+        - Ignore browser chrome, player names, stacks, blinds, timers, pot text, buttons, and avatar graphics as card evidence.
+        - The table uses a four-color deck: red hearts, blue diamonds, green clubs, black/dark spades.
+        - Do not guess a rank or suit. If either is unclear, return "?" for that card and lower confidence.
+        - Return only cards visibly confirmed in those regions; never infer missing cards from context.
+
         STAKE.COM UI LAYOUT (use this to locate elements):
         - Dark green felt table, octagonal shape, up to 8 player seats around perimeter
         - Hero seat: BOTTOM CENTER — hole cards shown near hero's seat area
@@ -1006,6 +1038,7 @@ enum StakeGeminiClient {
         }
 
         Use action WAITING if: no active hand, hero folded, or it is not hero's turn.
+        Before returning JSON, verify that the hand is not derived from the username and that every reported card is visibly present in the permitted card region.
         """
 
         let body: [String: Any] = [
