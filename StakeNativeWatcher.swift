@@ -102,6 +102,7 @@ final class NativeWatcherEngine {
         }
 
         // 2. Capture in-memory PNG
+        let captureStarted = Date()
         guard let imageData = ScreenCapture.capture(windowID: windowID) else {
             await MainActor.run {
                 self.store.setWatcherStatus("⚠️ Capture failed — ensure Screen Recording is granted in System Settings → Privacy → Screen Recording")
@@ -109,8 +110,12 @@ final class NativeWatcherEngine {
             return
         }
 
+        let captureMS = Int(Date().timeIntervalSince(captureStarted) * 1000)
+
         // 3. Hash — skip API if unchanged
+        let hashStarted = Date()
         let hash = Data(SHA256.hash(data: imageData))
+        let hashMS = Int(Date().timeIntervalSince(hashStarted) * 1000)
         guard hash != lastHash else { return }
         lastHash = hash
 
@@ -127,12 +132,16 @@ final class NativeWatcherEngine {
 
         // 5. Gemini vision
         do {
-            let advice = try await StakeGeminiClient.analyze(
+            let result = try await StakeGeminiClient.analyze(
                 imageData: imageData,
                 mode:      settings.gameMode.rawValue,
                 style:     settings.coachingStyle.rawValue,
                 apiKey:    apiKey
             )
+            let advice = result.advice
+            await MainActor.run {
+                self.store.setWatcherStatus("TIMING capture=\(captureMS)ms hash=\(hashMS)ms \(result.timings)")
+            }
             // Always publish Gemini's response, including WAITING responses.
             // A WAITING action can still contain the correctly detected hand;
             // dropping it makes the HUD appear to miss the cards entirely.
@@ -311,7 +320,8 @@ enum StakeGeminiClient {
         mode:      String,
         style:     String,
         apiKey:    String
-    ) async throws -> PokerAdvice {
+    ) async throws -> (advice: PokerAdvice, timings: String) {
+        let totalStarted = Date()
         let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=\(apiKey)"
         guard let url = URL(string: endpoint) else {
             throw APIError.parse("Invalid URL")
@@ -322,14 +332,24 @@ enum StakeGeminiClient {
         // Retina Floorp captures can be several thousand pixels wide. Send a
         // smaller PNG to Gemini so card details remain clear without paying the
         // latency penalty of the full browser-sized image.
+        let resizeStarted = Date()
         let payload = resizeImageData(imageData, maxWidth: 1024) ?? imageData
+        let resizeMS = Int(Date().timeIntervalSince(resizeStarted) * 1000)
+        let encodeStarted = Date()
         req.httpBody = try buildBody(imageData: payload, mode: mode, style: style)
+        let encodeMS = Int(Date().timeIntervalSince(encodeStarted) * 1000)
+        let requestStarted = Date()
         let (data, response) = try await URLSession.shared.data(for: req)
+        let networkMS = Int(Date().timeIntervalSince(requestStarted) * 1000)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw APIError.http(code, String(data: data, encoding: .utf8) ?? "")
         }
-        return try parseResponse(data: data)
+        let parseStarted = Date()
+        let advice = try parseResponse(data: data)
+        let parseMS = Int(Date().timeIntervalSince(parseStarted) * 1000)
+        let totalMS = Int(Date().timeIntervalSince(totalStarted) * 1000)
+        return (advice, "resize=\(resizeMS)ms encode=\(encodeMS)ms network=\(networkMS)ms parse=\(parseMS)ms total=\(totalMS)ms payload=\(payload.count / 1024)KB")
     }
 
     private static func resizeImageData(_ data: Data, maxWidth: CGFloat) -> Data? {
