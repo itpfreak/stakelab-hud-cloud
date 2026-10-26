@@ -80,6 +80,8 @@ final class NativeWatcherEngine {
     private var task:     Task<Void, Never>?
     private var inferenceTask: Task<Void, Never>?
     private var latestMeaningfulState = ""
+    private var candidateMeaningfulState = ""
+    private var candidateStateFrames = 0
     private var cachedHeroBox: CGRect?
     private(set) var isRunning = false
     private(set) var isPaused  = false
@@ -202,10 +204,14 @@ final class NativeWatcherEngine {
         // Ignore animation/timer changes that do not alter poker state. This is
         // the main latency win: OCR can continue, but Qwen only runs when cards,
         // board, action buttons, pot/stack, or HUD settings actually change.
+        // Canonicalize card order so OCR permutations (for example As7c vs 7cAs)
+        // do not trigger duplicate cloud requests. Board order remains meaningful.
+        let canonicalHero = ocrResult.heroCards.sorted().joined(separator: ",")
+        let canonicalBoard = ocrResult.boardCards.joined(separator: ",")
         let meaningfulState = [
-            ocrResult.heroCards.joined(separator: ","),
-            ocrResult.boardCards.joined(separator: ","),
-            ocrResult.detectedButtons.joined(separator: ","),
+            canonicalHero,
+            canonicalBoard,
+            ocrResult.detectedButtons.sorted().joined(separator: ","),
             ocrResult.potSize, ocrResult.heroStack,
             ocrResult.smallBlind, ocrResult.bigBlind, ocrResult.ante,
             ocrResult.heroFound ? "hero-found" : "hero-missing",
@@ -214,6 +220,21 @@ final class NativeWatcherEngine {
             settings.tournamentStructure.rawValue, settings.tournamentStage.rawValue
         ].joined(separator: "|")
         guard meaningfulState != latestMeaningfulState else { return }
+
+        // Require two adjacent observations before promoting a state. This filters
+        // one-frame OCR noise from card animations and moving table elements.
+        if candidateMeaningfulState == meaningfulState {
+            candidateStateFrames += 1
+        } else {
+            candidateMeaningfulState = meaningfulState
+            candidateStateFrames = 1
+        }
+        guard candidateStateFrames >= 2 else {
+            await MainActor.run {
+                self.store.setWatcherStatus("Candidate state awaiting confirmation (1 frame)")
+            }
+            return
+        }
 
         // OCR can miss graphical hole cards even while the action buttons prove
         // the hero is active. In cloud mode, let Gemini read the full screenshot
