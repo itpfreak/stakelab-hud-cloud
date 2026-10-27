@@ -80,6 +80,8 @@ final class NativeWatcherEngine {
     private var task:     Task<Void, Never>?
     private var inferenceTask: Task<Void, Never>?
     private var latestMeaningfulState = ""
+    private var candidateMeaningfulState = ""
+    private var candidateStateFrames = 0
     private var cachedHeroBox: CGRect?
     private(set) var isRunning = false
     private(set) var isPaused  = false
@@ -202,10 +204,14 @@ final class NativeWatcherEngine {
         // Ignore animation/timer changes that do not alter poker state. This is
         // the main latency win: OCR can continue, but Qwen only runs when cards,
         // board, action buttons, pot/stack, or HUD settings actually change.
+        // Canonicalize card order so OCR permutations (for example As7c vs 7cAs)
+        // do not trigger duplicate cloud requests. Board order remains meaningful.
+        let canonicalHero = ocrResult.heroCards.sorted().joined(separator: ",")
+        let canonicalBoard = ocrResult.boardCards.joined(separator: ",")
         let meaningfulState = [
-            ocrResult.heroCards.joined(separator: ","),
-            ocrResult.boardCards.joined(separator: ","),
-            ocrResult.detectedButtons.joined(separator: ","),
+            canonicalHero,
+            canonicalBoard,
+            ocrResult.detectedButtons.sorted().joined(separator: ","),
             ocrResult.potSize, ocrResult.heroStack,
             ocrResult.smallBlind, ocrResult.bigBlind, ocrResult.ante,
             ocrResult.heroFound ? "hero-found" : "hero-missing",
@@ -214,6 +220,21 @@ final class NativeWatcherEngine {
             settings.tournamentStructure.rawValue, settings.tournamentStage.rawValue
         ].joined(separator: "|")
         guard meaningfulState != latestMeaningfulState else { return }
+
+        // Require two adjacent observations before promoting a state. This filters
+        // one-frame OCR noise from card animations and moving table elements.
+        if candidateMeaningfulState == meaningfulState {
+            candidateStateFrames += 1
+        } else {
+            candidateMeaningfulState = meaningfulState
+            candidateStateFrames = 1
+        }
+        guard candidateStateFrames >= 2 else {
+            await MainActor.run {
+                self.store.setWatcherStatus("Candidate state awaiting confirmation (1 frame)")
+            }
+            return
+        }
 
         // OCR can miss graphical hole cards even while the action buttons prove
         // the hero is active. In cloud mode, let Gemini read the full screenshot
@@ -512,21 +533,35 @@ enum AppleVisionTableReader {
                 var finalCards: [String] = []
 
                 if isHero {
-                    // Hero cards: maxCards (2 in NLH, 4 in PLO)
-                    // If suit was not recognized by text OCR, sample pixel colors:
-                    // Token 0 -> left half of crop, Token 1 -> right half of crop
-                    for (idx, token) in rawTokens.prefix(maxCards).enumerated() {
+                    // Fixed-layout mode: the hero crop contains two physical card
+                    // slots. Never take the first two OCR tokens from the crop;
+                    // assign evidence to the left/right slot first.
+                    let slotCount = min(maxCards, 2)
+                    for idx in 0..<slotCount {
+                        let lo = CGFloat(idx) / CGFloat(slotCount)
+                        let hi = CGFloat(idx + 1) / CGFloat(slotCount)
+                        let candidates = rawTokens.filter { $0.box.midX >= lo && $0.box.midX < hi }
+                        guard let token = candidates.max(by: { $0.box.width * $0.box.height < $1.box.width * $1.box.height }) else {
+                            finalCards.append("??")
+                            continue
+                        }
                         var suit = token.suit
                         if suit.isEmpty {
-                            let halfW = cropW / CGFloat(max(1, min(maxCards, 2)))
-                            let sampleRect = CGRect(x: CGFloat(idx) * halfW, y: 0, width: halfW, height: cropH)
-                            suit = detectSuitFromColor(cgImage: cgImage, in: sampleRect)
+                            let slotRect = CGRect(x: lo * cropW, y: 0, width: (hi - lo) * cropW, height: cropH)
+                            suit = detectSuitFromColor(cgImage: cgImage, in: slotRect)
                         }
                         finalCards.append(token.rank + (suit.isEmpty ? "?" : suit))
                     }
                 } else {
-                    // Board cards: up to 5 cards (Flop 3, Turn 4, River 5)
-                    for token in rawTokens.prefix(maxCards) {
+                    // Board cards: preserve left-to-right physical order and
+                    // reject duplicate OCR observations in the same x slot.
+                    var selected: [(rank: String, suit: String, box: CGRect)] = []
+                    for token in rawTokens.sorted(by: { $0.box.midX < $1.box.midX }) {
+                        guard selected.allSatisfy({ abs($0.box.midX - token.box.midX) > 0.035 }) else { continue }
+                        selected.append(token)
+                        if selected.count == maxCards { break }
+                    }
+                    for token in selected {
                         var suit = token.suit
                         if suit.isEmpty {
                             let obBox = token.box
@@ -954,7 +989,7 @@ enum StakeGeminiClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody   = try buildBody(imageData: imageData, mode: mode, style: style)
         // Resize large images (browser windows can be 2560px+ Retina) to avoid timeouts
-        if let resized = resizeImageData(imageData, maxWidth: 1280) {
+        if let resized = resizeImageData(imageData, maxWidth: 1024) {
             req.httpBody = try buildBody(imageData: resized, mode: mode, style: style)
         }
         let (data, response) = try await URLSession.shared.data(for: req)
@@ -1049,7 +1084,7 @@ enum StakeGeminiClient {
                     "data": imageData.base64EncodedString()
                 ]]
             ]]],
-            "generationConfig": ["temperature": 0.15, "maxOutputTokens": 400]
+            "generationConfig": ["temperature": 0.1, "maxOutputTokens": 160]
         ]
         return try JSONSerialization.data(withJSONObject: body)
     }
