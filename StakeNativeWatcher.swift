@@ -535,7 +535,12 @@ enum AppleVisionTableReader {
                             width: min(w, max(8, ob.boundingBox.width * w * 2.6)),
                             height: min(h, max(8, ob.boundingBox.height * h * 3.0))
                         )
-                        guard hasLightCardFace(cgImage: cgImage, in: tokenRect) else { continue }
+                        // Board cards require a verified light card face to
+                        // reject green-felt/UI false positives. Hero slots are
+                        // already spatially anchored above J4clubs, so keep
+                        // their OCR candidate for slot diagnostics even when
+                        // the face-color probe misses due to scaling/antialiasing.
+                        if !isHero && !hasLightCardFace(cgImage: cgImage, in: tokenRect) { continue }
                         rawTokens.append((rank: rank, suit: suit, box: ob.boundingBox))
                     }
                 }
