@@ -524,6 +524,18 @@ enum AppleVisionTableReader {
                                 suit = s
                             }
                         }
+                        // Standard Front Deck cards have a light face. Reject
+                        // rank-like OCR from green felt, usernames, stacks, pot,
+                        // timers, and browser chrome before slot assignment.
+                        let w = CGFloat(cgImage.width)
+                        let h = CGFloat(cgImage.height)
+                        let tokenRect = CGRect(
+                            x: max(0, ob.boundingBox.origin.x * w - max(4, ob.boundingBox.width * w * 0.8)),
+                            y: max(0, (1.0 - ob.boundingBox.origin.y - ob.boundingBox.height) * h - max(4, ob.boundingBox.height * h * 1.2)),
+                            width: min(w, max(8, ob.boundingBox.width * w * 2.6)),
+                            height: min(h, max(8, ob.boundingBox.height * h * 3.0))
+                        )
+                        guard hasLightCardFace(cgImage: cgImage, in: tokenRect) else { continue }
                         rawTokens.append((rank: rank, suit: suit, box: ob.boundingBox))
                     }
                 }
@@ -654,6 +666,30 @@ enum AppleVisionTableReader {
         if green > blue && green > red && green > 80 { return "c" }
         if dark > 80 { return "s" }
         return ""
+    }
+
+    // Standard Front Deck validation: a rank-like token is card evidence only
+    // when its surrounding pixels contain a substantial light card face. This
+    // rejects false ranks from green felt, usernames, pot/stack text, and timers.
+    private static func hasLightCardFace(cgImage: CGImage, in rect: CGRect) -> Bool {
+        guard let dataRef = cgImage.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(dataRef) else { return false }
+        let w = cgImage.width, h = cgImage.height
+        let bpp = max(1, cgImage.bitsPerPixel / 8), bpr = cgImage.bytesPerRow
+        let x0 = max(0, min(w - 1, Int(rect.minX))), x1 = max(x0 + 1, min(w, Int(rect.maxX)))
+        let y0 = max(0, min(h - 1, Int(rect.minY))), y1 = max(y0 + 1, min(h, Int(rect.maxY)))
+        var light = 0, sampled = 0
+        let step = max(1, min(4, (x1 - x0) / 12))
+        for y in stride(from: y0, to: y1, by: step) {
+            for x in stride(from: x0, to: x1, by: step) {
+                let off = y * bpr + x * bpp
+                guard off + 2 < CFDataGetLength(dataRef) else { continue }
+                let r = Int(ptr[off]), g = Int(ptr[off + 1]), b = Int(ptr[off + 2])
+                sampled += 1
+                if r > 175 && g > 175 && b > 175 && max(r, max(g, b)) - min(r, min(g, b)) < 70 { light += 1 }
+            }
+        }
+        return sampled >= 8 && Double(light) / Double(sampled) >= 0.18
     }
 
     // MARK: - Full-image OCR
