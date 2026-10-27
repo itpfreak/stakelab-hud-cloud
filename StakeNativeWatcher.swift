@@ -547,8 +547,20 @@ enum AppleVisionTableReader {
                         }
                         var suit = token.suit
                         if suit.isEmpty {
-                            let slotRect = CGRect(x: lo * cropW, y: 0, width: (hi - lo) * cropW, height: cropH)
-                            suit = detectSuitFromColor(cgImage: cgImage, in: slotRect)
+                            // Standard Front Deck: suit is a small colored glyph
+                            // beside the rank. Sample only the right side of the
+                            // selected OCR token, never the whole white card slot.
+                            let tokenX = token.box.origin.x * cropW
+                            let tokenY = (1.0 - token.box.origin.y - token.box.height) * cropH
+                            let tokenW = token.box.width * cropW
+                            let tokenH = token.box.height * cropH
+                            let glyphRect = CGRect(
+                                x: min(cropW - 1, tokenX + tokenW * 0.45),
+                                y: max(0, tokenY - tokenH * 0.35),
+                                width: min(cropW * hi - (tokenX + tokenW * 0.45), max(2, tokenW * 0.75)),
+                                height: min(cropH - max(0, tokenY - tokenH * 0.35), max(2, tokenH * 1.7))
+                            )
+                            suit = detectSuitFromColor(cgImage: cgImage, in: glyphRect)
                         }
                         finalCards.append(token.rank + (suit.isEmpty ? "?" : suit))
                     }
@@ -1036,7 +1048,8 @@ enum StakeGeminiClient {
         - Hero hole cards may be read only from the two visible face-up card rectangles immediately above the J4clubs username.
         - Community cards may be read only from the face-up card row in the center of the green table.
         - Ignore browser chrome, player names, stacks, blinds, timers, pot text, buttons, and avatar graphics as card evidence.
-        - The table uses a four-color deck: red hearts, blue diamonds, green clubs, black/dark spades.
+        - Front Deck style is STANDARD: white cards with colored suit glyphs.
+        - Suit colors are supporting evidence only: red hearts, blue diamonds, green clubs, black/dark spades.
         - Do not guess a rank or suit. If either is unclear, return "?" for that card and lower confidence.
         - Return only cards visibly confirmed in those regions; never infer missing cards from context.
 

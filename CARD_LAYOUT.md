@@ -2,6 +2,12 @@
 
 David uses Floorp consistently and does not resize the table window during a session. The watcher therefore uses a locked geometry version after the `J4clubs` anchor is found.
 
+## Locked deck and layout
+
+- Front Deck: `STANDARD` (white card faces with colored suit glyphs).
+- Do not use full-card color as suit evidence; sample the suit glyph beside the rank.
+- Illustrated and High Contrast styles are unsupported until separately calibrated.
+
 ## Perception rules
 
 - Locate `J4clubs` only as a seat anchor; never parse username characters as cards.
